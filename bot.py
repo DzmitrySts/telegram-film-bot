@@ -42,7 +42,7 @@ def commit_films_to_github():
     url_get = f"https://api.github.com/repos/{repo}/contents/{FILMS_FILE}?ref={branch}"
     headers = {"Authorization": f"token {token}"}
     r = requests.get(url_get, headers=headers)
-    sha = r.json()["sha"] if r.status_code == 200 else None
+    sha = r.json().get("sha") if r.status_code == 200 else None
 
     data = {
         "message": "Обновление films.json через бота",
@@ -123,20 +123,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             source = film.get("file_id") or film.get("url")
             caption = film.get("title", f"Фильм {text}")
             if not source:
-                await update.message.reply_text("❌ Ошибка: у фильма нет файла или ссылки.")
-                return
+                return  # Игнорируем, если нет файла
             try:
-                if film.get("file_id"):
-                    await update.message.reply_video(video=source, caption=caption)
-                else:
-                    await update.message.reply_text(f"Ссылка: {source}\n\n{caption}")
+                await update.message.reply_video(video=source, caption=caption)
             except Exception as e:
                 logger.exception("Ошибка при отправке фильма")
-                await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
         else:
             await update.message.reply_text("Фильм с таким кодом не найден 😢")
     else:
-        # Игнорируем текст от обычного пользователя, если это не кнопка
+        # Не отвечаем на нечисловой текст
         return
 
 # === Обработка видео (для /add) ===
@@ -146,7 +141,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = context.user_data.get("add_code")
     title = context.user_data.get("add_title")
     if not code or not title:
-        await update.message.reply_text("Сначала используйте команду /add <код> <название>")
         return
     file_id = update.message.video.file_id
     films = load_films()
