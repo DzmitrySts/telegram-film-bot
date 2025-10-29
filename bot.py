@@ -15,11 +15,11 @@ from telegram.ext import (
 )
 
 # ========== Настройки ==========
-TOKEN = os.environ.get("TELEGRAM_TOKEN")  # Telegram token
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 FILMS_FILE = "films.json"
 
-GITHUB_REPO = os.environ.get("GITHUB_REPO")        # e.g. username/repo
+GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
@@ -27,7 +27,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== Работа с films.json ==========
+# ========== Работа с JSON ==========
 def load_films():
     try:
         p = Path(FILMS_FILE)
@@ -49,7 +49,6 @@ def save_films(films: dict):
         return
     commit_films_to_github()
 
-# ========== Коммит в GitHub ==========
 def commit_films_to_github():
     if not all([GITHUB_REPO, GITHUB_TOKEN]):
         logger.warning("GitHub параметры не заданы — коммит пропущен")
@@ -76,12 +75,12 @@ def commit_films_to_github():
     except Exception:
         logger.exception("Ошибка при коммите films.json на GitHub")
 
-# ========== Хендлеры ==========
+# ========== Команды ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["🔍 Поиск по коду"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "Привет! 👋\nНажми «🔍 Поиск по коду» и введи код (3–5 цифр).",
+        "Привет! 👋\nНажми «🔍 Поиск по коду» и введи код фильма (3–5 цифр).",
         reply_markup=reply_markup
     )
 
@@ -93,9 +92,7 @@ async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎞 В базе пока нет фильмов.")
         return
 
-    # 🔢 Сортировка по числовому значению кода
     sorted_films = dict(sorted(films.items(), key=lambda x: int(x[0])))
-
     lines = [f"{code} — {data.get('title','Без названия')}" for code, data in sorted_films.items()]
     await update.message.reply_text("🎬 Список фильмов (по возрастанию кода):\n\n" + "\n".join(lines))
 
@@ -132,7 +129,6 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_films(films)
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
 
-# ========== Редактирование ==========
 async def edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -165,35 +161,38 @@ async def edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edit_video_code"] = code
     await update.message.reply_text(f"Теперь отправьте новый видеофайл для кода {code}.")
 
+# ========== Пользовательские сообщения ==========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
-    if not txt:
-        return
 
+    # Если нажал кнопку — включаем режим поиска
     if txt == "🔍 Поиск по коду":
-        await update.message.reply_text("Введите код фильма (3–5 цифр):")
         context.user_data["waiting_code"] = True
+        await update.message.reply_text("Введите код фильма (3–5 цифр):")
         return
 
-    if context.user_data.get("waiting_code"):
-        context.user_data.pop("waiting_code", None)
-        if not txt.isdigit():
-            await update.message.reply_text("❌ Допускаются только цифры (3–5 цифр).")
-            return
-        if not (3 <= len(txt) <= 5):
-            await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
-            return
-        await send_film_by_code(update, context, txt)
+    # Если пользователь не нажал кнопку, но вводит что-то
+    if not context.user_data.get("waiting_code"):
+        await update.message.reply_text("❗ Сначала нажмите кнопку «🔍 Поиск по коду», чтобы начать поиск фильма.")
         return
 
-    if txt.isdigit():
-        if not (3 <= len(txt) <= 5):
-            await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
-            return
-        await send_film_by_code(update, context, txt)
-        return
-    else:
+    # Если нажал кнопку и теперь вводит код
+    if not txt.isdigit():
         await update.message.reply_text("❌ Допускаются только цифры (3–5 цифр).")
+        return
+    if not (3 <= len(txt) <= 5):
+        await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
+        return
+
+    films = load_films()
+    film = films.get(txt)
+    if not film:
+        await update.message.reply_text("😕 Фильм с таким кодом не найден. Попробуйте другой код.")
+        return  # остаётся в режиме поиска
+
+    # Код найден — отправляем фильм и выходим из режима поиска
+    context.user_data.pop("waiting_code", None)
+    await send_film_by_code(update, context, txt)
 
 async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
     films = load_films()
@@ -203,9 +202,8 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     title = film.get("title", "")
     file_id = film.get("file_id")
-    url = film.get("url") or film.get("source")
+    url = film.get("url")
     caption = title or f"Фильм {code}"
-
     try:
         if file_id:
             await update.message.reply_video(video=file_id, caption=caption)
@@ -215,7 +213,7 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await update.message.reply_text("❌ У этого фильма нет файла или ссылки.")
     except Exception:
         logger.exception("Ошибка при отправке фильма")
-        await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
+        await update.message.reply_text("Ошибка при отправке фильма, попробуйте позже.")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
