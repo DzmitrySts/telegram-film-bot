@@ -171,12 +171,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введите код фильма (3–5 цифр):")
         return
 
-    # Если пользователь не нажал кнопку, но вводит что-то
+    # Если пользователь не нажал кнопку
     if not context.user_data.get("waiting_code"):
         await update.message.reply_text("❗ Сначала нажмите кнопку «🔍 Поиск по коду», чтобы начать поиск фильма.")
         return
 
-    # Если нажал кнопку и теперь вводит код
+    # Проверка корректности кода
     if not txt.isdigit():
         await update.message.reply_text("❌ Допускаются только цифры (3–5 цифр).")
         return
@@ -193,6 +193,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Код найден — отправляем фильм и выходим из режима поиска
     context.user_data.pop("waiting_code", None)
     await send_film_by_code(update, context, txt)
+    await update.message.reply_text("🎬 Чтобы найти другой фильм, нажмите снова кнопку «🔍 Поиск по коду».")
 
 async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
     films = load_films()
