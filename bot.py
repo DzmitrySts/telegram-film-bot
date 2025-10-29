@@ -1,18 +1,18 @@
 import json
 import logging
 from pathlib import Path
-from telegram import Update, InputFile
+from telegram import Update, InputFile, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен бота и админ
+# 🔐 Токен и настройки
 TOKEN = "8295792965:AAFCOTaWj0vDhS1XfTP8MQ0Ip9gMundUxKw"
 ADMIN_ID = 481076515
 FILMS_PATH = Path("films.json")
 
-# Загрузка/сохранение фильмов
+# 📁 Работа с файлами
 def load_films():
     if FILMS_PATH.exists():
         return json.loads(FILMS_PATH.read_text(encoding="utf-8"))
@@ -23,11 +23,19 @@ def save_films(data):
 
 FILMS = load_films()
 
-# /start
+# 🏠 Команда /start — главное меню
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Введи код из 3–5 цифр, я пришлю фильм 🎬")
+    keyboard = [
+        [KeyboardButton("🔍 Поиск по коду")],
+        [KeyboardButton("🎞 Список фильмов")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(
+        "Привет! 👋\nВыбери действие:",
+        reply_markup=reply_markup
+    )
 
-# Список всех фильмов
+# 📜 Список фильмов
 async def list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not FILMS:
         await update.message.reply_text("Фильмы не загружены.")
@@ -35,7 +43,7 @@ async def list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"{k}: {v.get('title','')}" for k,v in FILMS.items()]
     await update.message.reply_text("\n".join(lines))
 
-# Удаление фильма по коду
+# 🗑 Удаление фильма
 async def del_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Только админ может это делать.")
@@ -52,13 +60,9 @@ async def del_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"Код {code} не найден 😕")
 
-# Получение фильма по коду
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not text.isdigit() or not (3 <= len(text) <= 5):
-        await update.message.reply_text("Отправь код из 3–5 цифр.")
-        return
-    film = FILMS.get(text)
+# 🎬 Отправка фильма по коду
+async def send_film(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+    film = FILMS.get(code)
     if not film:
         await update.message.reply_text("Фильм с таким кодом не найден 😕")
         return
@@ -83,7 +87,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка при отправке фильма")
         await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
 
-# Обработка видео с подписью "<код> <название фильма>"
+# 📥 Обработка текста
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    # Обработка кнопок меню
+    if text == "🔍 Поиск по коду":
+        await update.message.reply_text("Введите код фильма (3–5 цифр):")
+        context.user_data["waiting_for_code"] = True
+        return
+
+    if text == "🎞 Список фильмов":
+        await list_codes(update, context)
+        return
+
+    # Если пользователь ввёл код после кнопки
+    if context.user_data.get("waiting_for_code"):
+        if text.isdigit() and 3 <= len(text) <= 5:
+            await send_film(update, context, text)
+        else:
+            await update.message.reply_text("Код должен быть числом от 3 до 5 цифр.")
+        context.user_data["waiting_for_code"] = False
+        return
+
+    # Прямое введение кода без кнопки
+    if text.isdigit() and 3 <= len(text) <= 5:
+        await send_film(update, context, text)
+    else:
+        await update.message.reply_text("Выбери действие из меню или введи корректный код фильма 🎬")
+
+# 🎥 Добавление видео с подписью "<код> <название>"
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Только админ может добавлять фильмы.")
@@ -106,15 +139,15 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_films(FILMS)
     await update.message.reply_text(f"Фильм с кодом {code} добавлен ✅")
 
-# Запуск бота
+# 🚀 Запуск
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_codes))
     app.add_handler(CommandHandler("del", del_code))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))  # Обработка видео
-    print("✅ Бот запущен!")
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    print("✅ Бот запущен с меню!")
     app.run_polling()
 
 if __name__ == "__main__":
