@@ -47,7 +47,6 @@ def save_films(films: dict):
             json.dump(films, f, ensure_ascii=False, indent=2)
     except Exception:
         logger.exception("Ошибка записи films.json")
-    # Попробовать закоммитить в GitHub
     try:
         commit_films_to_github()
     except Exception:
@@ -126,3 +125,87 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.message.text or "").strip()
+    if not txt:
+        return
+    if txt == "🔍 Поиск по коду":
+        await update.message.reply_text("Введите код фильма (3–5 цифр):")
+        context.user_data["waiting_code"] = True
+        return
+    if context.user_data.get("waiting_code"):
+        code = txt
+        context.user_data.pop("waiting_code", None)
+        await send_film_by_code(update, context, code)
+        return
+    if txt.isdigit() and 3 <= len(txt) <= 5:
+        await send_film_by_code(update, context, txt)
+        return
+
+async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+    films = load_films()
+    film = films.get(code)
+    if not film:
+        await update.message.reply_text("Фильм с таким кодом не найден 😕")
+        return
+    title = film.get("title", "")
+    file_id = film.get("file_id")
+    url = film.get("url") or film.get("source")
+    caption = title or f"Фильм {code}"
+
+    try:
+        if file_id:
+            await update.message.reply_video(video=file_id, caption=caption)
+        elif url:
+            await update.message.reply_text(f"{caption}\n{url}")
+        else:
+            await update.message.reply_text("❌ У этого фильма нет файла или ссылки.")
+    except Exception:
+        logger.exception("Ошибка при отправке фильма")
+        await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    code = context.user_data.get("add_code")
+    title = context.user_data.get("add_title")
+    if not code or not title:
+        return
+    if update.message.video:
+        file_id = update.message.video.file_id
+    elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
+        file_id = update.message.document.file_id
+    else:
+        await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
+        return
+
+    films = load_films()
+    films[code] = {"title": title, "file_id": file_id}
+    save_films(films)
+    await update.message.reply_text(f"Фильм '{title}' с кодом {code} добавлен ✅")
+    context.user_data.pop("add_code", None)
+    context.user_data.pop("add_title", None)
+
+# ========== Точка входа ==========
+def main():
+    if not TOKEN or not WEBHOOK_URL:
+        logger.error("TELEGRAM_TOKEN или WEBHOOK_URL не заданы.")
+        return
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("list", list_films))
+    app.add_handler(CommandHandler("add", add_command))
+    app.add_handler(CommandHandler("del", del_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+
+    logger.info("Бот запущен через webhook.")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=WEBHOOK_URL
+    )
+
+if __name__ == "__main__":
+    main()
