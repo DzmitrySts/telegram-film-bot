@@ -1,73 +1,101 @@
+#!/usr/bin/env python3
+import os
 import json
 import logging
 import base64
-import os
 import requests
+from pathlib import Path
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
-# === НАСТРОЙКИ ===
-TOKEN = "8295792965:AAFCOTaWj0vDhS1XfTP8MQ0Ip9gMundUxKw"
-ADMIN_ID = 481076515
+# ========== Настройки ==========
+# Рекомендуется задать эти переменные в Railway (Environment variables)
+TOKEN = os.environ.get("TELEGRAM_TOKEN")  # обязательно
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 FILMS_FILE = "films.json"
 
+# GitHub для синхронизации (опционально)
+GITHUB_REPO = os.environ.get("GITHUB_REPO")        # e.g. DzmitrySts/telegram-film-bot
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+
+# ========== Логирование ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === ЗАГРУЗКА/СОХРАНЕНИЕ ФИЛЬМОВ ===
+# ========== Работа с films.json ==========
 def load_films():
     try:
-        with open(FILMS_FILE, "r", encoding="utf-8") as f:
+        p = Path(FILMS_FILE)
+        if not p.exists():
+            p.write_text("{}", encoding="utf-8")
+            return {}
+        with p.open("r", encoding="utf-8") as f:
             return json.load(f)
-    except FileNotFoundError:
+    except Exception as e:
+        logger.exception("Ошибка чтения films.json")
         return {}
 
-def save_films(films):
-    with open(FILMS_FILE, "w", encoding="utf-8") as f:
-        json.dump(films, f, ensure_ascii=False, indent=2)
-    commit_films_to_github()  # коммитим сразу после изменения
+def save_films(films: dict):
+    try:
+        with open(FILMS_FILE, "w", encoding="utf-8") as f:
+            json.dump(films, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("Ошибка записи films.json")
+    # Попробовать закоммитить в GitHub (если настроено)
+    try:
+        commit_films_to_github()
+    except Exception:
+        logger.exception("Ошибка при вызове commit_films_to_github")
 
-# === КОММИТ НА GITHUB ===
+# ========== Коммит в GitHub ==========
 def commit_films_to_github():
-    repo = os.environ.get("GITHUB_REPO")
-    branch = os.environ.get("GITHUB_BRANCH", "main")
-    token = os.environ.get("GITHUB_TOKEN")
-    if not all([repo, token]):
-        logger.warning("GitHub данные не заданы, коммит пропущен")
+    if not all([GITHUB_REPO, GITHUB_TOKEN]):
+        logger.debug("GitHub параметры не заданы — коммит пропущен")
         return
 
     with open(FILMS_FILE, "r", encoding="utf-8") as f:
         content = f.read()
 
-    url_get = f"https://api.github.com/repos/{repo}/contents/{FILMS_FILE}?ref={branch}"
-    headers = {"Authorization": f"token {token}"}
-    r = requests.get(url_get, headers=headers)
-    sha = r.json().get("sha") if r.status_code == 200 else None
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{FILMS_FILE}?ref={GITHUB_BRANCH}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    r = requests.get(url, headers=headers)
+    sha = None
+    if r.status_code == 200:
+        try:
+            sha = r.json().get("sha")
+        except Exception:
+            sha = None
 
-    data = {
-        "message": "Обновление films.json через бота",
+    payload = {
+        "message": "Обновление films.json через бот",
         "content": base64.b64encode(content.encode()).decode(),
-        "branch": branch
+        "branch": GITHUB_BRANCH,
     }
     if sha:
-        data["sha"] = sha
+        payload["sha"] = sha
 
-    r2 = requests.put(url_get, headers=headers, json=data)
-    if r2.status_code in [200, 201]:
-        logger.info("Фильмы успешно закоммичены на GitHub")
+    put_resp = requests.put(url, headers=headers, json=payload)
+    if put_resp.status_code in (200, 201):
+        logger.info("Коммит films.json на GitHub выполнен.")
     else:
-        logger.error(f"Ошибка коммита: {r2.text}")
+        logger.error("Ошибка коммита на GitHub: %s", put_resp.text)
 
-# === /start ===
+# ========== Хендлеры ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["🔍 Поиск по коду"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "Привет! 👋\nОтправь код фильма (например, 777), чтобы получить видео.",
-        reply_markup=reply_markup
+        "Привет! 👋\nНажми «🔍 Поиск по коду» и введи код (3–5 цифр).", reply_markup=reply_markup
     )
 
-# === /list для админа ===
+# /list (только админ). Для всех остальных — игнорируем (без ответа).
 async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -75,12 +103,10 @@ async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not films:
         await update.message.reply_text("🎞 В базе пока нет фильмов.")
         return
-    msg = "🎬 Список фильмов:\n\n"
-    for code, film in films.items():
-        msg += f"{code} — {film.get('title', 'Без названия')}\n"
-    await update.message.reply_text(msg)
+    lines = [f"{k} — {v.get('title','Без названия')}" for k, v in films.items()]
+    await update.message.reply_text("🎬 Список фильмов:\n\n" + "\n".join(lines))
 
-# === /add <код> <название> ===
+# /add <код> <название>  — админ запускает, бот ждёт видео
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -92,9 +118,9 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = " ".join(args[1:])
     context.user_data["add_code"] = code
     context.user_data["add_title"] = title
-    await update.message.reply_text(f"Отправьте видео для фильма '{title}'")
+    await update.message.reply_text(f"ОК. Теперь отправьте видео для фильма: {title} (код {code})")
 
-# === /del <код> ===
+# /del <код> — удаление (только админ)
 async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -108,57 +134,100 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_films(films)
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
 
-# === Обработка текста ===
+# Обработка текстовых сообщений (кнопка и ввод кода)
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    txt = (update.message.text or "").strip()
+    if not txt:
+        return
+
+    # Кнопка поиска
+    if txt == "🔍 Поиск по коду":
+        await update.message.reply_text("Введите код фильма (3–5 цифр):")
+        context.user_data["waiting_code"] = True
+        return
+
+    # Ожидаем код после нажатия кнопки
+    if context.user_data.get("waiting_code"):
+        code = txt
+        context.user_data.pop("waiting_code", None)
+        await send_film_by_code(update, context, code)
+        return
+
+    # Если просто ввели код
+    if txt.isdigit() and 3 <= len(txt) <= 5:
+        await send_film_by_code(update, context, txt)
+        return
+
+    # Иначе молчим (не отвечаем)
+    return
+
+# Отправка фильма по коду
+async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
     films = load_films()
-
-    if text == "🔍 Поиск по коду":
-        await update.message.reply_text("Введи код фильма (3–5 цифр):")
+    film = films.get(code)
+    if not film:
+        await update.message.reply_text("Фильм с таким кодом не найден 😕")
         return
+    title = film.get("title", "")
+    file_id = film.get("file_id")
+    url = film.get("url") or film.get("source")
+    caption = title or f"Фильм {code}"
 
-    if text.isdigit():
-        if text in films:
-            film = films[text]
-            source = film.get("file_id") or film.get("url")
-            caption = film.get("title", f"Фильм {text}")
-            if not source:
-                return  # Игнорируем, если нет файла
-            try:
-                await update.message.reply_video(video=source, caption=caption)
-            except Exception as e:
-                logger.exception("Ошибка при отправке фильма")
+    try:
+        if file_id:
+            await update.message.reply_video(video=file_id, caption=caption)
+        elif url:
+            # для ссылок просто присылаем сообщение с ссылкой (Telegram может встраивать mp4)
+            await update.message.reply_text(f"{caption}\n{url}")
         else:
-            await update.message.reply_text("Фильм с таким кодом не найден 😢")
-    else:
-        # Не отвечаем на нечисловой текст
-        return
+            # нет ни file_id ни url
+            await update.message.reply_text("❌ У этого фильма нет файла или ссылки.")
+    except Exception:
+        logger.exception("Ошибка при отправке фильма")
+        await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
 
-# === Обработка видео (для /add) ===
+# Обработка видео: сюда попадает видео при ожидании после /add
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     code = context.user_data.get("add_code")
     title = context.user_data.get("add_title")
     if not code or not title:
+        # если админ случайно прислал видео без /add — игнорируем
         return
-    file_id = update.message.video.file_id
+    # Берём file_id видео
+    if update.message.video:
+        file_id = update.message.video.file_id
+    elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
+        file_id = update.message.document.file_id
+    else:
+        await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
+        return
+
     films = load_films()
     films[code] = {"title": title, "file_id": file_id}
     save_films(films)
     await update.message.reply_text(f"Фильм '{title}' с кодом {code} добавлен ✅")
-    context.user_data.pop("add_code")
-    context.user_data.pop("add_title")
+    context.user_data.pop("add_code", None)
+    context.user_data.pop("add_title", None)
 
-# === ЗАПУСК ===
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("list", list_films))
-app.add_handler(CommandHandler("add", add_command))
-app.add_handler(CommandHandler("del", del_command))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+# ========== Точка входа ==========
+def main():
+    if not TOKEN:
+        logger.error("TELEGRAM_TOKEN не задан. Установите переменную окружения TELEGRAM_TOKEN.")
+        return
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("list", list_films))
+    app.add_handler(CommandHandler("add", add_command))
+    app.add_handler(CommandHandler("del", del_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+
+    logger.info("Бот запущен.")
+    app.run_polling()
 
 if __name__ == "__main__":
-    print("Бот запущен...")
-    app.run_polling()
+    main()
