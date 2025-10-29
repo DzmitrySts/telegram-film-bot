@@ -15,12 +15,14 @@ from telegram.ext import (
 )
 
 # ========== Настройки ==========
-# Рекомендуется задать эти переменные в Railway (Environment variables)
-TOKEN = os.environ.get("TELEGRAM_TOKEN")  # обязательно
+# Задайте переменные окружения в Railway / локально:
+# TELEGRAM_TOKEN - токен бота (обязательно)
+# ADMIN_ID - id администратора (опционально, по умолчанию 481076515)
+# (опционально для синхронизации) GITHUB_REPO, GITHUB_BRANCH, GITHUB_TOKEN
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 FILMS_FILE = "films.json"
 
-# GitHub для синхронизации (опционально)
 GITHUB_REPO = os.environ.get("GITHUB_REPO")        # e.g. DzmitrySts/telegram-film-bot
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -38,7 +40,7 @@ def load_films():
             return {}
         with p.open("r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
+    except Exception:
         logger.exception("Ошибка чтения films.json")
         return {}
 
@@ -48,7 +50,7 @@ def save_films(films: dict):
             json.dump(films, f, ensure_ascii=False, indent=2)
     except Exception:
         logger.exception("Ошибка записи films.json")
-    # Попробовать закоммитить в GitHub (если настроено)
+    # Попытка коммита в GitHub (если настроено)
     try:
         commit_films_to_github()
     except Exception:
@@ -74,7 +76,7 @@ def commit_films_to_github():
             sha = None
 
     payload = {
-        "message": "Обновление films.json через бот",
+        "message": "Обновление films.json через бота",
         "content": base64.b64encode(content.encode()).decode(),
         "branch": GITHUB_BRANCH,
     }
@@ -177,10 +179,8 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if file_id:
             await update.message.reply_video(video=file_id, caption=caption)
         elif url:
-            # для ссылок просто присылаем сообщение с ссылкой (Telegram может встраивать mp4)
             await update.message.reply_text(f"{caption}\n{url}")
         else:
-            # нет ни file_id ни url
             await update.message.reply_text("❌ У этого фильма нет файла или ссылки.")
     except Exception:
         logger.exception("Ошибка при отправке фильма")
@@ -193,7 +193,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = context.user_data.get("add_code")
     title = context.user_data.get("add_title")
     if not code or not title:
-        # если админ случайно прислал видео без /add — игнорируем
         return
     # Берём file_id видео
     if update.message.video:
@@ -217,6 +216,7 @@ def main():
         logger.error("TELEGRAM_TOKEN не задан. Установите переменную окружения TELEGRAM_TOKEN.")
         return
 
+    # ApplicationBuilder используется в PTB 20+ (без прямого Updater)
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -224,6 +224,7 @@ def main():
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("del", del_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Обрабатываем и "video" и документ-как-видео
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
 
     logger.info("Бот запущен.")
