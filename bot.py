@@ -92,8 +92,12 @@ async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not films:
         await update.message.reply_text("🎞 В базе пока нет фильмов.")
         return
-    lines = [f"{k} — {v.get('title','Без названия')}" for k, v in films.items()]
-    await update.message.reply_text("🎬 Список фильмов:\n\n" + "\n".join(lines))
+
+    # 🔢 Сортировка по числовому значению кода
+    sorted_films = dict(sorted(films.items(), key=lambda x: int(x[0])))
+
+    lines = [f"{code} — {data.get('title','Без названия')}" for code, data in sorted_films.items()]
+    await update.message.reply_text("🎬 Список фильмов (по возрастанию кода):\n\n" + "\n".join(lines))
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -217,7 +221,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    # Новый фильм через /add
     code = context.user_data.get("add_code")
     title = context.user_data.get("add_title")
     if code and title:
@@ -237,7 +240,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("add_title", None)
         return
 
-    # Замена видео через /editm
     edit_code = context.user_data.get("edit_video_code")
     if edit_code:
         file_id = None
