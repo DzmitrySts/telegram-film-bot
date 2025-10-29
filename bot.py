@@ -164,6 +164,8 @@ async def edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== Пользовательские сообщения ==========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
+    keyboard = [["🔍 Поиск по коду"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
     # Если нажал кнопку — включаем режим поиска
     if txt == "🔍 Поиск по коду":
@@ -173,7 +175,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Если пользователь не нажал кнопку
     if not context.user_data.get("waiting_code"):
-        await update.message.reply_text("❗ Сначала нажмите кнопку «🔍 Поиск по коду», чтобы начать поиск фильма.")
+        await update.message.reply_text(
+            "❗ Сначала нажмите кнопку «🔍 Поиск по коду», чтобы начать поиск фильма.",
+            reply_markup=reply_markup
+        )
         return
 
     # Проверка корректности кода
@@ -193,7 +198,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Код найден — отправляем фильм и выходим из режима поиска
     context.user_data.pop("waiting_code", None)
     await send_film_by_code(update, context, txt)
-    await update.message.reply_text("🎬 Чтобы найти другой фильм, нажмите снова кнопку «🔍 Поиск по коду».")
+    await update.message.reply_text(
+        "🎬 Чтобы найти другой фильм, нажмите снова кнопку «🔍 Поиск по коду».",
+        reply_markup=reply_markup
+    )
 
 async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
     films = load_films()
