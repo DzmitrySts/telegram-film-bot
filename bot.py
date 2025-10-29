@@ -31,6 +31,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+# === СПИСОК ФИЛЬМОВ (только для админа) ===
+async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        # просто игнорируем без ответа
+        return
+
+    films = load_films()
+    if not films:
+        await update.message.reply_text("🎞 В базе пока нет фильмов.")
+        return
+
+    msg = "🎬 Список фильмов:\n\n"
+    for code, film in films.items():
+        title = film.get("title", "Без названия")
+        msg += f"{code} — {title}\n"
+
+    await update.message.reply_text(msg)
+
 # === ОБРАБОТКА ТЕКСТА ===
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -48,11 +66,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             source = film.get("file_id") or film.get("url")
             caption = film.get("title", f"Фильм {text}")
 
+            if not source:
+                await update.message.reply_text("❌ Ошибка: у фильма нет файла или ссылки.")
+                return
+
             try:
-                if source.startswith("http"):
-                    await update.message.reply_video(video=source, caption=caption)
-                else:
-                    await update.message.reply_video(video=source, caption=caption)
+                await update.message.reply_video(video=source, caption=caption)
             except Exception as e:
                 logging.error(f"Ошибка при отправке фильма: {e}")
                 await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
@@ -64,6 +83,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === ЗАПУСК ===
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("list", list_films))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 if __name__ == "__main__":
