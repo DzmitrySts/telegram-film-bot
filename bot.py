@@ -105,22 +105,17 @@ async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"{k} — {v.get('title','Без названия')}" for k, v in films.items()]
     await update.message.reply_text("🎬 Список фильмов:\n\n" + "\n".join(lines))
 
-# ====== Исправленный add_command ======
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
     args = context.args
     if len(args) < 2:
         await update.message.reply_text("Использование: /add <код> <название>")
         return
-
     code = args[0]
-    # Проверка: только 3–5 цифр
     if not code.isdigit() or not (3 <= len(code) <= 5):
         await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
         return
-
     title = " ".join(args[1:])
     context.user_data["add_code"] = code
     context.user_data["add_title"] = title
@@ -139,7 +134,6 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_films(films)
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
 
-# ====== Исправленный handle_text для пользователей ======
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
     if not txt:
@@ -151,23 +145,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if context.user_data.get("waiting_code"):
-        code = txt
         context.user_data.pop("waiting_code", None)
-        if not code.isdigit() or not (3 <= len(code) <= 5):
+        if not txt.isdigit():
+            await update.message.reply_text("❌ Допускаются только цифры (3–5 цифр).")
+            return
+        if not (3 <= len(txt) <= 5):
             await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
             return
-        await send_film_by_code(update, context, code)
-        return
-
-    if txt.isdigit() and 3 <= len(txt) <= 5:
         await send_film_by_code(update, context, txt)
         return
+
+    if txt.isdigit():
+        if not (3 <= len(txt) <= 5):
+            await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
+            return
+        await send_film_by_code(update, context, txt)
+        return
+    else:
+        await update.message.reply_text("❌ Допускаются только цифры (3–5 цифр).")
 
 async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
     films = load_films()
     film = films.get(code)
     if not film:
-        await update.message.reply_text("Фильм с таким кодом не найден 😕")
+        await update.message.reply_text("😕 Фильм с таким кодом не найден.")
         return
     title = film.get("title", "")
     file_id = film.get("file_id")
