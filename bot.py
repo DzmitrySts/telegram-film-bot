@@ -25,7 +25,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 # ========== Логирование ==========
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 # ========== Работа с films.json ==========
 def load_films():
@@ -117,7 +117,7 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["add_code"] = code
     context.user_data["add_title"] = title
     await update.message.reply_text(f"ОК. Теперь отправьте видео для фильма: {title} (код {code})")
-    
+
 async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -213,5 +213,5 @@ def main():
     logger.info("Бот запущен.")
     app.run_polling()
 
-if name == "main":
+if __name__ == "__main__":
     main()
