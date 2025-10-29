@@ -36,17 +36,14 @@ def commit_films_to_github():
         logger.warning("GitHub данные не заданы, коммит пропущен")
         return
 
-    # Считываем локальный файл
     with open(FILMS_FILE, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Получаем SHA текущего файла на GitHub
     url_get = f"https://api.github.com/repos/{repo}/contents/{FILMS_FILE}?ref={branch}"
     headers = {"Authorization": f"token {token}"}
     r = requests.get(url_get, headers=headers)
     sha = r.json()["sha"] if r.status_code == 200 else None
 
-    # Подготавливаем данные для коммита
     data = {
         "message": "Обновление films.json через бота",
         "content": base64.b64encode(content.encode()).decode(),
@@ -55,7 +52,6 @@ def commit_films_to_github():
     if sha:
         data["sha"] = sha
 
-    # Отправляем PUT запрос
     r2 = requests.put(url_get, headers=headers, json=data)
     if r2.status_code in [200, 201]:
         logger.info("Фильмы успешно закоммичены на GitHub")
@@ -130,14 +126,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Ошибка: у фильма нет файла или ссылки.")
                 return
             try:
-                await update.message.reply_video(video=source, caption=caption)
+                if film.get("file_id"):
+                    await update.message.reply_video(video=source, caption=caption)
+                else:
+                    await update.message.reply_text(f"Ссылка: {source}\n\n{caption}")
             except Exception as e:
                 logger.exception("Ошибка при отправке фильма")
                 await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
         else:
             await update.message.reply_text("Фильм с таким кодом не найден 😢")
     else:
-        await update.message.reply_text("Отправь только числовой код (3–5 цифр).")
+        # Игнорируем текст от обычного пользователя, если это не кнопка
+        return
 
 # === Обработка видео (для /add) ===
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
