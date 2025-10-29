@@ -15,14 +15,11 @@ from telegram.ext import (
 )
 
 # ========== Настройки ==========
-# Задайте переменные окружения в Railway / локально:
-# TELEGRAM_TOKEN - токен бота (обязательно)
-# ADMIN_ID - id администратора (опционально, по умолчанию 481076515)
-# (опционально для синхронизации) GITHUB_REPO, GITHUB_BRANCH, GITHUB_TOKEN
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_TOKEN")  # обязательно
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 FILMS_FILE = "films.json"
 
+# GitHub для синхронизации
 GITHUB_REPO = os.environ.get("GITHUB_REPO")        # e.g. DzmitrySts/telegram-film-bot
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -40,7 +37,7 @@ def load_films():
             return {}
         with p.open("r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
         logger.exception("Ошибка чтения films.json")
         return {}
 
@@ -50,11 +47,10 @@ def save_films(films: dict):
             json.dump(films, f, ensure_ascii=False, indent=2)
     except Exception:
         logger.exception("Ошибка записи films.json")
-    # Попытка коммита в GitHub (если настроено)
     try:
         commit_films_to_github()
     except Exception:
-        logger.exception("Ошибка при вызове commit_films_to_github")
+        logger.exception("Ошибка при коммите films.json на GitHub")
 
 # ========== Коммит в GitHub ==========
 def commit_films_to_github():
@@ -76,7 +72,7 @@ def commit_films_to_github():
             sha = None
 
     payload = {
-        "message": "Обновление films.json через бота",
+        "message": "Обновление films.json через бот",
         "content": base64.b64encode(content.encode()).decode(),
         "branch": GITHUB_BRANCH,
     }
@@ -97,7 +93,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привет! 👋\nНажми «🔍 Поиск по коду» и введи код (3–5 цифр).", reply_markup=reply_markup
     )
 
-# /list (только админ). Для всех остальных — игнорируем (без ответа).
 async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -108,7 +103,6 @@ async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"{k} — {v.get('title','Без названия')}" for k, v in films.items()]
     await update.message.reply_text("🎬 Список фильмов:\n\n" + "\n".join(lines))
 
-# /add <код> <название>  — админ запускает, бот ждёт видео
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -122,7 +116,6 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["add_title"] = title
     await update.message.reply_text(f"ОК. Теперь отправьте видео для фильма: {title} (код {code})")
 
-# /del <код> — удаление (только админ)
 async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -136,34 +129,23 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_films(films)
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
 
-# Обработка текстовых сообщений (кнопка и ввод кода)
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
     if not txt:
         return
-
-    # Кнопка поиска
     if txt == "🔍 Поиск по коду":
         await update.message.reply_text("Введите код фильма (3–5 цифр):")
         context.user_data["waiting_code"] = True
         return
-
-    # Ожидаем код после нажатия кнопки
     if context.user_data.get("waiting_code"):
         code = txt
         context.user_data.pop("waiting_code", None)
         await send_film_by_code(update, context, code)
         return
-
-    # Если просто ввели код
     if txt.isdigit() and 3 <= len(txt) <= 5:
         await send_film_by_code(update, context, txt)
         return
 
-    # Иначе молчим (не отвечаем)
-    return
-
-# Отправка фильма по коду
 async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
     films = load_films()
     film = films.get(code)
@@ -174,7 +156,6 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     file_id = film.get("file_id")
     url = film.get("url") or film.get("source")
     caption = title or f"Фильм {code}"
-
     try:
         if file_id:
             await update.message.reply_video(video=file_id, caption=caption)
@@ -186,7 +167,6 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         logger.exception("Ошибка при отправке фильма")
         await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
 
-# Обработка видео: сюда попадает видео при ожидании после /add
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -194,7 +174,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = context.user_data.get("add_title")
     if not code or not title:
         return
-    # Берём file_id видео
     if update.message.video:
         file_id = update.message.video.file_id
     elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
@@ -216,7 +195,6 @@ def main():
         logger.error("TELEGRAM_TOKEN не задан. Установите переменную окружения TELEGRAM_TOKEN.")
         return
 
-    # ApplicationBuilder используется в PTB 20+ (без прямого Updater)
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -224,7 +202,6 @@ def main():
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("del", del_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    # Обрабатываем и "video" и документ-как-видео
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
 
     logger.info("Бот запущен.")
