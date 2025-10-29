@@ -5,11 +5,12 @@ import logging
 import base64
 import requests
 from pathlib import Path
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -27,7 +28,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== Работа с JSON ==========
+# ========== Работа с films.json ==========
 def load_films():
     try:
         p = Path(FILMS_FILE)
@@ -49,17 +50,24 @@ def save_films(films: dict):
         return
     commit_films_to_github()
 
+# ========== Коммит в GitHub ==========
 def commit_films_to_github():
     if not all([GITHUB_REPO, GITHUB_TOKEN]):
         logger.warning("GitHub параметры не заданы — коммит пропущен")
         return
+
     try:
         with open(FILMS_FILE, "r", encoding="utf-8") as f:
             content = f.read()
+
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{FILMS_FILE}?ref={GITHUB_BRANCH}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+
         r = requests.get(url, headers=headers)
-        sha = r.json().get("sha") if r.status_code == 200 else None
+        sha = None
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+
         payload = {
             "message": "Обновление films.json через бот",
             "content": base64.b64encode(content.encode()).decode(),
@@ -67,6 +75,7 @@ def commit_films_to_github():
         }
         if sha:
             payload["sha"] = sha
+
         put_resp = requests.put(url, headers=headers, json=payload)
         if put_resp.status_code in (200, 201):
             logger.info("✅ Коммит films.json на GitHub выполнен.")
@@ -75,12 +84,12 @@ def commit_films_to_github():
     except Exception:
         logger.exception("Ошибка при коммите films.json на GitHub")
 
-# ========== Команды ==========
+# ========== Хендлеры ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["🔍 Поиск по коду"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "Привет! 👋\nНажми «🔍 Поиск по коду» и введи код фильма (3–5 цифр).",
+        "Привет! 👋\nНажми «🔍 Поиск по коду» и введи код (3–5 цифр).",
         reply_markup=reply_markup
     )
 
@@ -91,10 +100,8 @@ async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not films:
         await update.message.reply_text("🎞 В базе пока нет фильмов.")
         return
-
-    sorted_films = dict(sorted(films.items(), key=lambda x: int(x[0])))
-    lines = [f"{code} — {data.get('title','Без названия')}" for code, data in sorted_films.items()]
-    await update.message.reply_text("🎬 Список фильмов (по возрастанию кода):\n\n" + "\n".join(lines))
+    lines = [f"{k} — {v.get('title','Без названия')}" for k, v in sorted(films.items(), key=lambda x: int(x[0]))]
+    await update.message.reply_text("🎬 Список фильмов:\n\n" + "\n".join(lines))
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -103,14 +110,17 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_text("Использование: /add <код> <название>")
         return
+
     code = args[0]
-    if not code.isdigit() or not (3 <= len(code) <= 5):
-        await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
+    if not (code.isdigit() and 3 <= len(code) <= 5):
+        await update.message.reply_text("❗ Код должен содержать только цифры (от 3 до 5).")
         return
+
     films = load_films()
     if code in films:
-        await update.message.reply_text(f"❌ Код {code} уже существует. Используйте другой код.")
+        await update.message.reply_text(f"❗ Код {code} уже существует. Используйте другой.")
         return
+
     title = " ".join(args[1:])
     context.user_data["add_code"] = code
     context.user_data["add_title"] = title
@@ -129,90 +139,54 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_films(films)
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
 
-async def edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Использование: /editn <код> <новое название>")
-        return
-    code = args[0]
-    new_title = " ".join(args[1:])
-    films = load_films()
-    if code not in films:
-        await update.message.reply_text(f"❌ Код {code} не найден.")
-        return
-    films[code]["title"] = new_title
-    save_films(films)
-    await update.message.reply_text(f"Название фильма с кодом {code} обновлено на '{new_title}' ✅")
-
-async def edit_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    args = context.args
-    if not args:
-        await update.message.reply_text("Использование: /editm <код> и отправьте новый файл видео.")
-        return
-    code = args[0]
-    films = load_films()
-    if code not in films:
-        await update.message.reply_text(f"❌ Код {code} не найден.")
-        return
-    context.user_data["edit_video_code"] = code
-    await update.message.reply_text(f"Теперь отправьте новый видеофайл для кода {code}.")
-
-# ========== Пользовательские сообщения ==========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
-    keyboard = [["🔍 Поиск по коду"]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-    # Если нажал кнопку — включаем режим поиска
-    if txt == "🔍 Поиск по коду":
-        context.user_data["waiting_code"] = True
-        await update.message.reply_text("Введите код фильма (3–5 цифр):")
+    if not txt:
         return
 
-    # Если пользователь не нажал кнопку
-    if not context.user_data.get("waiting_code"):
+    if txt == "🔍 Поиск по коду":
+        context.user_data["waiting_code"] = True
         await update.message.reply_text(
-            "❗ Сначала нажмите кнопку «🔍 Поиск по коду», чтобы начать поиск фильма.",
-            reply_markup=reply_markup
+            "Введите код фильма (3–5 цифр):",
         )
         return
 
-    # Проверка корректности кода
-    if not txt.isdigit():
-        await update.message.reply_text("❌ Допускаются только цифры (3–5 цифр).")
+    # Если пользователь не нажал кнопку поиска
+    if not context.user_data.get("waiting_code"):
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]])
+        await update.message.reply_text(
+            "❗ Сначала нажмите кнопку «🔍 Поиск по коду», чтобы начать поиск фильма.",
+            reply_markup=keyboard
+        )
         return
+
+    if not txt.isdigit():
+        await update.message.reply_text("❗ Код должен содержать только цифры (от 3 до 5).")
+        return
+
     if not (3 <= len(txt) <= 5):
-        await update.message.reply_text("❌ Код должен состоять из 3–5 цифр.")
+        await update.message.reply_text("❗ Код должен быть от 3 до 5 цифр.")
         return
 
     films = load_films()
-    film = films.get(txt)
-    if not film:
-        await update.message.reply_text("😕 Фильм с таким кодом не найден. Попробуйте другой код.")
-        return  # остаётся в режиме поиска
+    if txt not in films:
+        await update.message.reply_text("❌ Фильм с таким кодом не найден.")
+        return
 
-    # Код найден — отправляем фильм и выходим из режима поиска
-    context.user_data.pop("waiting_code", None)
     await send_film_by_code(update, context, txt)
-    await update.message.reply_text(
-        "🎬 Чтобы найти другой фильм, нажмите снова кнопку «🔍 Поиск по коду».",
-        reply_markup=reply_markup
-    )
 
 async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
     films = load_films()
     film = films.get(code)
     if not film:
-        await update.message.reply_text("😕 Фильм с таким кодом не найден.")
+        await update.message.reply_text("Фильм с таким кодом не найден 😕")
         return
+
     title = film.get("title", "")
     file_id = film.get("file_id")
-    url = film.get("url")
+    url = film.get("url") or film.get("source")
     caption = title or f"Фильм {code}"
+
     try:
         if file_id:
             await update.message.reply_video(video=file_id, caption=caption)
@@ -222,7 +196,16 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await update.message.reply_text("❌ У этого фильма нет файла или ссылки.")
     except Exception:
         logger.exception("Ошибка при отправке фильма")
-        await update.message.reply_text("Ошибка при отправке фильма, попробуйте позже.")
+        await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
+
+    # После успешной отправки — показать inline-кнопку
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]])
+    await update.message.reply_text(
+        "🎬 Чтобы найти другой фильм, нажмите снова кнопку «🔍 Поиск по коду».",
+        reply_markup=keyboard
+    )
+
+    context.user_data.pop("waiting_code", None)
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -230,38 +213,31 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     code = context.user_data.get("add_code")
     title = context.user_data.get("add_title")
-    if code and title:
-        file_id = None
-        if update.message.video:
-            file_id = update.message.video.file_id
-        elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
-            file_id = update.message.document.file_id
-        else:
-            await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
-            return
-        films = load_films()
-        films[code] = {"title": title, "file_id": file_id}
-        save_films(films)
-        await update.message.reply_text(f"Фильм '{title}' с кодом {code} добавлен ✅")
-        context.user_data.pop("add_code", None)
-        context.user_data.pop("add_title", None)
+    if not code or not title:
         return
 
-    edit_code = context.user_data.get("edit_video_code")
-    if edit_code:
-        file_id = None
-        if update.message.video:
-            file_id = update.message.video.file_id
-        elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
-            file_id = update.message.document.file_id
-        else:
-            await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
-            return
-        films = load_films()
-        films[edit_code]["file_id"] = file_id
-        save_films(films)
-        await update.message.reply_text(f"Видео для фильма с кодом {edit_code} обновлено ✅")
-        context.user_data.pop("edit_video_code", None)
+    if update.message.video:
+        file_id = update.message.video.file_id
+    elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
+        file_id = update.message.document.file_id
+    else:
+        await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
+        return
+
+    films = load_films()
+    films[code] = {"title": title, "file_id": file_id}
+    save_films(films)
+    await update.message.reply_text(f"Фильм '{title}' с кодом {code} добавлен ✅")
+    context.user_data.pop("add_code", None)
+    context.user_data.pop("add_title", None)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "search_code":
+        context.user_data["waiting_code"] = True
+        await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
 # ========== Точка входа ==========
 def main():
@@ -275,10 +251,9 @@ def main():
     app.add_handler(CommandHandler("list", list_films))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("del", del_command))
-    app.add_handler(CommandHandler("editn", edit_name))
-    app.add_handler(CommandHandler("editm", edit_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Бот запущен.")
     app.run_polling()
