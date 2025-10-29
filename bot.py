@@ -1,6 +1,9 @@
 import json
 import logging
-from telegram import Update, ReplyKeyboardMarkup, InputFile
+import base64
+import os
+import requests
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 # === НАСТРОЙКИ ===
@@ -22,6 +25,42 @@ def load_films():
 def save_films(films):
     with open(FILMS_FILE, "w", encoding="utf-8") as f:
         json.dump(films, f, ensure_ascii=False, indent=2)
+    commit_films_to_github()  # коммитим сразу после изменения
+
+# === КОММИТ НА GITHUB ===
+def commit_films_to_github():
+    repo = os.environ.get("GITHUB_REPO")
+    branch = os.environ.get("GITHUB_BRANCH", "main")
+    token = os.environ.get("GITHUB_TOKEN")
+    if not all([repo, token]):
+        logger.warning("GitHub данные не заданы, коммит пропущен")
+        return
+
+    # Считываем локальный файл
+    with open(FILMS_FILE, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Получаем SHA текущего файла на GitHub
+    url_get = f"https://api.github.com/repos/{repo}/contents/{FILMS_FILE}?ref={branch}"
+    headers = {"Authorization": f"token {token}"}
+    r = requests.get(url_get, headers=headers)
+    sha = r.json()["sha"] if r.status_code == 200 else None
+
+    # Подготавливаем данные для коммита
+    data = {
+        "message": "Обновление films.json через бота",
+        "content": base64.b64encode(content.encode()).decode(),
+        "branch": branch
+    }
+    if sha:
+        data["sha"] = sha
+
+    # Отправляем PUT запрос
+    r2 = requests.put(url_get, headers=headers, json=data)
+    if r2.status_code in [200, 201]:
+        logger.info("Фильмы успешно закоммичены на GitHub")
+    else:
+        logger.error(f"Ошибка коммита: {r2.text}")
 
 # === /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -35,7 +74,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === /list для админа ===
 async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        return  # игнорируем других
+        return
     films = load_films()
     if not films:
         await update.message.reply_text("🎞 В базе пока нет фильмов.")
@@ -82,7 +121,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Введи код фильма (3–5 цифр):")
         return
 
-    # Проверка — введён код
     if text.isdigit():
         if text in films:
             film = films[text]
