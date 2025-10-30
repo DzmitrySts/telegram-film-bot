@@ -88,7 +88,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "Привет! 👋\nНажмите кнопку «🔍 Поиск по коду» и введите код (3–5 цифр).",
+        "Привет! 👋\nНажмите кнопку «🔍 Поиск по коду» для поиска фильма.",
         reply_markup=reply_markup
     )
 
