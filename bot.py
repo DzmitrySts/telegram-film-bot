@@ -134,6 +134,8 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         films.pop(code)
         save_films(films)
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
+    else:
+        await update.message.reply_text(f"❌ Код {code} не найден в базе.")
 
 async def edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -155,17 +157,28 @@ async def edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    code = context.user_data.get("edit_code")
-    if not code:
-        await update.message.reply_text("Сначала используйте /editm <код> и отправьте видео")
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Использование: /editm <код>")
         return
+
+    code = args[0]
+    films = load_films()
+    if code not in films:
+        await update.message.reply_text(f"❌ Код {code} не найден в базе. Сначала добавьте фильм через /add.")
+        return
+
+    context.user_data["edit_code"] = code
+    await update.message.reply_text(
+        f"ОК. Отправьте новый видеофайл для фильма «{films[code].get('title', 'Без названия')}» (код {code})."
+    )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
     if not txt:
         return
 
-    # Если пользователь ещё не нажал кнопку поиска
     if not context.user_data.get("waiting_code"):
         keyboard = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -201,7 +214,6 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await update.message.reply_text(f"{caption}\n{url}")
         else:
             await update.message.reply_text("❌ У этого фильма нет файла или ссылки.")
-        # После успешного отправления подсказка
         keyboard = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
@@ -216,23 +228,49 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    code = context.user_data.get("add_code")
-    title = context.user_data.get("add_title")
-    if not code or not title:
-        return
-    if update.message.video:
-        file_id = update.message.video.file_id
-    elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
-        file_id = update.message.document.file_id
-    else:
-        await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
-        return
+
     films = load_films()
-    films[code] = {"title": title, "file_id": file_id}
-    save_films(films)
-    await update.message.reply_text(f"Фильм '{title}' с кодом {code} добавлен ✅")
-    context.user_data.pop("add_code", None)
-    context.user_data.pop("add_title", None)
+
+    # --- Редактирование видео ---
+    edit_code = context.user_data.get("edit_code")
+    if edit_code:
+        if edit_code not in films:
+            await update.message.reply_text("❌ Код не найден. Возможно, фильм был удалён.")
+            context.user_data.pop("edit_code", None)
+            return
+
+        if update.message.video:
+            file_id = update.message.video.file_id
+        elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
+            file_id = update.message.document.file_id
+        else:
+            await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
+            return
+
+        films[edit_code]["file_id"] = file_id
+        save_films(films)
+        await update.message.reply_text(
+            f"✅ Видео для фильма «{films[edit_code]['title']}» (код {edit_code}) обновлено."
+        )
+        context.user_data.pop("edit_code", None)
+        return
+
+    # --- Добавление нового фильма ---
+    add_code = context.user_data.get("add_code")
+    title = context.user_data.get("add_title")
+    if add_code and title:
+        if update.message.video:
+            file_id = update.message.video.file_id
+        elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
+            file_id = update.message.document.file_id
+        else:
+            await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
+            return
+        films[add_code] = {"title": title, "file_id": file_id}
+        save_films(films)
+        await update.message.reply_text(f"Фильм '{title}' с кодом {add_code} добавлен ✅")
+        context.user_data.pop("add_code", None)
+        context.user_data.pop("add_title", None)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
