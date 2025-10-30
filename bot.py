@@ -299,7 +299,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # Пользователь уже подписан — разрешаем ввод кода
             context.user_data["waiting_code"] = True
-            await query.message.reply_text("✅ Вы подписаны! Введите код фильма (3–5 цифр):")
+            await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
     elif query.data == "subscribed":
         user_id = query.from_user.id
