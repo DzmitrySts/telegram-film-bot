@@ -24,9 +24,9 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
-# Каналы для подписки
+# Каналы, на которые нужно быть подписанным
 REQUIRED_CHANNELS = [
-    ("@okkosport", "Okko Спорт")
+    ("@offmatch", "Offmatch")
 ]
 
 # ========== Логирование ==========
@@ -139,8 +139,6 @@ async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         films.pop(code)
         save_films(films)
         await update.message.reply_text(f"Фильм с кодом {code} удалён ✅")
-    else:
-        await update.message.reply_text(f"❌ Код {code} не найден в базе.")
 
 async def edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -162,18 +160,15 @@ async def edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
     args = context.args
     if not args:
         await update.message.reply_text("Использование: /editm <код>")
         return
-
     code = args[0]
     films = load_films()
     if code not in films:
         await update.message.reply_text(f"❌ Код {code} не найден в базе. Сначала добавьте фильм через /add.")
         return
-
     context.user_data["edit_code"] = code
     await update.message.reply_text(
         f"ОК. Отправьте новый видеофайл для фильма «{films[code].get('title', 'Без названия')}» (код {code})."
@@ -236,7 +231,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     films = load_films()
 
-    # --- Редактирование видео ---
     edit_code = context.user_data.get("edit_code")
     if edit_code:
         if edit_code not in films:
@@ -244,14 +238,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("edit_code", None)
             return
 
-        if update.message.video:
-            file_id = update.message.video.file_id
-        elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
-            file_id = update.message.document.file_id
-        else:
-            await update.message.reply_text("Пожалуйста, отправьте видео-файл (MP4).")
-            return
-
+        file_id = (
+            update.message.video.file_id
+            if update.message.video
+            else update.message.document.file_id
+        )
         films[edit_code]["file_id"] = file_id
         save_films(films)
         await update.message.reply_text(
@@ -260,7 +251,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("edit_code", None)
         return
 
-    # --- Добавление нового фильма ---
     add_code = context.user_data.get("add_code")
     title = context.user_data.get("add_title")
     if add_code and title:
@@ -281,7 +271,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Нажал "Поиск по коду"
     if query.data == "search_code":
         buttons = [
             [InlineKeyboardButton(name, url=f"https://t.me/{chan[1:] if chan.startswith('@') else chan}")]
@@ -294,7 +283,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
-    # Нажал "✅ Подписался"
     elif query.data == "subscribed":
         user_id = query.from_user.id
         not_subscribed = []
@@ -323,15 +311,12 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Команды для всех
     app.add_handler(CommandHandler("start", start))
-    # Админские команды
     app.add_handler(CommandHandler("list", list_films))
     app.add_handler(CommandHandler("add", add_command))
     app.add_handler(CommandHandler("del", del_command))
     app.add_handler(CommandHandler("editn", edit_name))
     app.add_handler(CommandHandler("editm", edit_media))
-    # Основные хендлеры
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(CallbackQueryHandler(button_callback))
