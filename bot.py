@@ -272,16 +272,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "search_code":
-        buttons = [
-            [InlineKeyboardButton(name, url=f"https://t.me/{chan[1:] if chan.startswith('@') else chan}")]
-            for chan, name in REQUIRED_CHANNELS
-        ]
-        buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
-        reply_markup = InlineKeyboardMarkup(buttons)
-        await query.message.reply_text(
-            "📢 Чтобы продолжить, подпишитесь на канал:",
-            reply_markup=reply_markup
-        )
+        user_id = query.from_user.id
+        not_subscribed = []
+
+        # Проверяем подписку на обязательные каналы
+        for chan, name in REQUIRED_CHANNELS:
+            try:
+                chat_member = await context.bot.get_chat_member(chat_id=chan, user_id=user_id)
+                if chat_member.status not in ("member", "administrator", "creator"):
+                    not_subscribed.append((chan, name))
+            except Exception:
+                not_subscribed.append((chan, name))
+
+        if not_subscribed:
+            # Пользователь не подписан — показываем кнопку
+            buttons = [
+                [InlineKeyboardButton(name, url=f"https://t.me/{chan[1:] if chan.startswith('@') else chan}")]
+                for chan, name in not_subscribed
+            ]
+            buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
+            reply_markup = InlineKeyboardMarkup(buttons)
+            await query.message.reply_text(
+                "📢 Чтобы продолжить, подпишитесь на канал:",
+                reply_markup=reply_markup
+            )
+        else:
+            # Пользователь уже подписан — разрешаем ввод кода
+            context.user_data["waiting_code"] = True
+            await query.message.reply_text("✅ Вы подписаны! Введите код фильма (3–5 цифр):")
 
     elif query.data == "subscribed":
         user_id = query.from_user.id
