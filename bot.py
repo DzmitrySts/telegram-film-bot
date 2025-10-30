@@ -26,7 +26,8 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 # Каналы, на которые нужно быть подписанным
 REQUIRED_CHANNELS = [
-    ("@offmatch", "Offmatch")
+    ("@offmatch", "Offmatch"),
+    ("@sportseasy", "EasySport")
 ]
 
 # ========== Логирование ==========
