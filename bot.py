@@ -107,19 +107,20 @@ def save_users(users: dict):
 def add_user(user_id, username=None, first_name=None):
     users = load_users()
     uid = str(user_id)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     if uid not in users:
         users[uid] = {
             "username": username,
             "first_name": first_name,
-            "first_seen": datetime.datetime.utcnow().isoformat() + "Z",
-            "last_seen": datetime.datetime.utcnow().isoformat() + "Z",
+            "first_seen": now,
+            "last_seen": now,
         }
         save_users(users)
         logger.info(f"👤 Новый пользователь: {user_id}")
     else:
         users[uid]["username"] = username
         users[uid]["first_name"] = first_name
-        users[uid]["last_seen"] = datetime.datetime.utcnow().isoformat() + "Z"
+        users[uid]["last_seen"] = now
         save_users(users)
 
 # ========== Хендлеры ==========
@@ -393,7 +394,7 @@ def main():
         app.run_polling()
     except Exception as e:
         if "Conflict" in str(e):
-            logger.warning("⚠️ Обнаружен конфликт polling: другой экземпляр бота уже использует getUpdates. Этот процесс завершится.")
+            logger.warning("⚠️ Конфликт polling: другой экземпляр бота уже использует getUpdates. Этот процесс завершится.")
         else:
             logger.exception("Ошибка при запуске бота:")
 
