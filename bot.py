@@ -24,6 +24,11 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
+# Каналы для подписки
+REQUIRED_CHANNELS = [
+    ("@okkosport", "Okko Спорт")
+]
+
 # ========== Логирование ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -275,9 +280,40 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # Нажал "Поиск по коду"
     if query.data == "search_code":
+        buttons = [
+            [InlineKeyboardButton(name, url=f"https://t.me/{chan[1:] if chan.startswith('@') else chan}")]
+            for chan, name in REQUIRED_CHANNELS
+        ]
+        buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
+        reply_markup = InlineKeyboardMarkup(buttons)
+        await query.message.reply_text(
+            "📢 Чтобы продолжить, подпишитесь на канал:",
+            reply_markup=reply_markup
+        )
+
+    # Нажал "✅ Подписался"
+    elif query.data == "subscribed":
+        user_id = query.from_user.id
+        not_subscribed = []
+
+        for chan, name in REQUIRED_CHANNELS:
+            try:
+                chat_member = await context.bot.get_chat_member(chat_id=chan, user_id=user_id)
+                if chat_member.status not in ("member", "administrator", "creator"):
+                    not_subscribed.append(name)
+            except Exception:
+                not_subscribed.append(name)
+
+        if not_subscribed:
+            msg = "❌ Вы не подписаны на обязательный канал:\n" + "\n".join(f"• {ch}" for ch in not_subscribed)
+            await query.message.reply_text(msg)
+            return
+
         context.user_data["waiting_code"] = True
-        await query.message.reply_text("Введите код фильма (3–5 цифр):")
+        await query.message.reply_text("✅ Подписка подтверждена! Введите код фильма (3–5 цифр):")
 
 # ========== Точка входа ==========
 def main():
