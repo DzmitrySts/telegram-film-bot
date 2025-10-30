@@ -29,7 +29,6 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 # Каналы, на которые нужно быть подписанным
 REQUIRED_CHANNELS = [
     ("@offmatch", "Offmatch"),
-    ("@sportseasy", "EasySport")
 ]
 
 # ========== Логирование ==========
@@ -349,7 +348,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             context.user_data["waiting_code"] = True
-            await query.message.reply_text("✅ Вы подписаны! Введите код фильма (3–5 цифр):")
+            await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
     elif query.data == "subscribed":
         user_id = query.from_user.id
