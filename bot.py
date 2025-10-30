@@ -4,6 +4,7 @@ import json
 import logging
 import base64
 import requests
+import datetime
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -19,6 +20,7 @@ from telegram.ext import (
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 FILMS_FILE = "films.json"
+USERS_FILE = "users.json"
 
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
@@ -27,6 +29,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 # Каналы, на которые нужно быть подписанным
 REQUIRED_CHANNELS = [
     ("@offmatch", "Offmatch"),
+    ("@sportseasy", "EasySport")
 ]
 
 # ========== Логирование ==========
@@ -54,6 +57,41 @@ def save_films(films: dict):
         logger.exception("Ошибка записи films.json")
         return
     commit_films_to_github()
+
+# ========== Работа с users.json (статистика) ==========
+def load_users():
+    try:
+        p = Path(USERS_FILE)
+        if not p.exists():
+            p.write_text("{}", encoding="utf-8")
+            return {}
+        with p.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        logger.exception("Ошибка чтения users.json")
+        return {}
+
+def save_users(users: dict):
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("Ошибка записи users.json")
+
+def record_user_obj(user):
+    """Сохраняет/обновляет инфу о пользователе в users.json"""
+    if not user or getattr(user, "is_bot", False):
+        return
+    try:
+        users = load_users()
+        uid = str(user.id)
+        users.setdefault(uid, {})
+        users[uid]["first_name"] = user.first_name
+        users[uid]["username"] = user.username
+        users[uid]["last_seen"] = datetime.datetime.utcnow().isoformat() + "Z"
+        save_users(users)
+    except Exception:
+        logger.exception("Ошибка при записи пользователя в users.json")
 
 # ========== Коммит в GitHub ==========
 def commit_films_to_github():
@@ -90,6 +128,9 @@ def commit_films_to_github():
 
 # ========== Хендлеры ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # записываем пользователя
+    record_user_obj(update.effective_user)
+
     keyboard = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -175,6 +216,9 @@ async def edit_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # записываем пользователя
+    record_user_obj(update.effective_user)
+
     txt = (update.message.text or "").strip()
     if not txt:
         return
@@ -226,6 +270,9 @@ async def send_film_by_code(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await update.message.reply_text("Ошибка при отправке фильма, попробуй позже.")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # записываем пользователя
+    record_user_obj(update.effective_user)
+
     if update.effective_user.id != ADMIN_ID:
         return
 
@@ -271,6 +318,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # Записываем пользователя (callback)
+    record_user_obj(query.from_user)
+
     if query.data == "search_code":
         user_id = query.from_user.id
 
@@ -299,7 +349,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             context.user_data["waiting_code"] = True
-            await query.message.reply_text("Введите код фильма (3–5 цифр):")
+            await query.message.reply_text("✅ Вы подписаны! Введите код фильма (3–5 цифр):")
 
     elif query.data == "subscribed":
         user_id = query.from_user.id
@@ -321,6 +371,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_code"] = True
         await query.message.reply_text("✅ Подписка подтверждена! Введите код фильма (3–5 цифр):")
 
+# ========== Команда /stats (только для админа) ==========
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    users = load_users()
+    total = len(users)
+    # сортируем по last_seen (последние сверху)
+    sorted_users = sorted(users.items(), key=lambda x: x[1].get("last_seen",""), reverse=True)
+    lines = []
+    for uid, info in sorted_users[:10]:
+        name = info.get("first_name", "")
+        uname = ("@" + info["username"]) if info.get("username") else ""
+        last = info.get("last_seen", "")
+        lines.append(f"{uid} {name} {uname} — {last}")
+    msg = f"Уникальных пользователей: {total}\n\nПоследние пользователи:\n" + (("\n".join(lines)) if lines else "нет данных")
+    await update.message.reply_text(msg)
+
 # ========== Точка входа ==========
 def main():
     if not TOKEN:
@@ -335,6 +402,7 @@ def main():
     app.add_handler(CommandHandler("del", del_command))
     app.add_handler(CommandHandler("editn", edit_name))
     app.add_handler(CommandHandler("editm", edit_media))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(CallbackQueryHandler(button_callback))
