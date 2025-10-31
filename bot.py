@@ -119,12 +119,12 @@ async def add_command(update, context):
 
     code = args[0]
     if not code.isdigit() or not 3 <= len(code) <= 5:
-        return await update.message.reply_text("Код должен быть от 3 до 5 цифр!")
+        return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
 
     pool = context.bot_data["pool"]
     film = await get_film(pool, code)
     if film:
-        return await update.message.reply_text("Такой код уже существует!")
+        return await update.message.reply_text("❌ Такой код уже существует!")
 
     context.user_data["add_code"] = code
     context.user_data["add_title"] = " ".join(args[1:])
@@ -197,7 +197,7 @@ async def send_film_by_code(update, context, code):
     pool = context.bot_data["pool"]
     film = await get_film(pool, code)
     if not film:
-        return await update.message.reply_text("❌ Нет фильма с таким кодом.")
+        return await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй ввести другой код.")
     if film["file_id"] is not None:
         await update.message.reply_video(film["file_id"], caption=film["title"])
         user_id = update.effective_user.id
