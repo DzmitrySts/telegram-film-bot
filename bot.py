@@ -267,7 +267,15 @@ async def send_film_by_code(update, context, code):
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
 
+    # Сбрасываем флаг ожидания
     context.user_data.pop("waiting_code", None)
+
+    # Отправляем отдельное сообщение с кнопкой поиска
+    kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
+    await update.message.reply_text(
+        "Чтобы продолжить, нажмите кнопку «🔍 Поиск по коду».",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 async def button_callback(update, context):
     query = update.callback_query
