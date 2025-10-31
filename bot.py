@@ -200,6 +200,12 @@ async def send_film_by_code(update, context, code):
         return await update.message.reply_text("❌ Нет фильма с таким кодом.")
     if film["file_id"] is not None:
         await update.message.reply_video(film["file_id"], caption=film["title"])
+        user_id = update.effective_user.id
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO user_films(user_id, film_code)
+                VALUES($1, $2)
+            """, user_id, code)
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
     context.user_data.pop("waiting_code", None)
