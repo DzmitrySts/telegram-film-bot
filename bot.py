@@ -21,7 +21,6 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ✅ Отключаем шумные логгеры, которые пишут ERROR при 409-Conflict
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 logging.getLogger("telegram").setLevel(logging.CRITICAL)
 logging.getLogger("telegram.ext").setLevel(logging.CRITICAL)
@@ -39,12 +38,11 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
-# Обязательный канал
 REQUIRED_CHANNELS = [
     ("@offmatch", "Offmatch")
 ]
 
-# ========== Работа с JSON-файлами ==========
+# ========== Работа с JSON ==========
 def load_json(filename):
     try:
         p = Path(filename)
@@ -65,7 +63,6 @@ def save_json(filename, data):
         return
     commit_to_github(filename)
 
-# ========== Коммит файлов ==========
 def commit_to_github(filename):
     if not all([GITHUB_REPO, GITHUB_TOKEN]):
         return
@@ -102,19 +99,20 @@ def save_users(users):
 def add_user(user_id, username, first_name):
     users = load_users()
     uid = str(user_id)
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
     if uid not in users:
-        users[uid] = {
-            "username": username,
-            "first_name": first_name,
-            "first_seen": now
-        }
+        users[uid] = {"username": username, "first_name": first_name}
     else:
         users[uid]["username"] = username
         users[uid]["first_name"] = first_name
-
     save_users(users)
+
+# ========== Кнопка поиска ==========
+async def send_search_button(update, context):
+    kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
+    await update.message.reply_text(
+        "Чтобы продолжить, нажмите кнопку «🔍 Поиск по коду».",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 # ========== Хендлеры ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,7 +216,6 @@ async def handle_video(update, context):
 
     films = load_json(FILMS_FILE)
 
-    # Редактирование
     if "edit_code" in context.user_data:
         code = context.user_data["edit_code"]
         films[code]["file_id"] = update.message.video.file_id
@@ -226,25 +223,21 @@ async def handle_video(update, context):
         context.user_data.clear()
         return await update.message.reply_text("✅ Видео обновлено.")
 
-    # Добавление
     if "add_code" in context.user_data:
         code = context.user_data["add_code"]
         title = context.user_data["add_title"]
         films[code] = {"title": title, "file_id": update.message.video.file_id}
         save_json(FILMS_FILE, films)
         context.user_data.clear()
-        return await update.message.reply_text("✅ Фильм добавлен.")
+        await update.message.reply_text("✅ Фильм добавлен.")
+        return await send_search_button(update, context)
 
 async def handle_text(update, context):
     add_user(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
 
     txt = update.message.text.strip()
     if not context.user_data.get("waiting_code"):
-        kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
-        return await update.message.reply_text(
-            "❗ Сначала нажмите кнопку «🔍 Поиск по коду»",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        return await send_search_button(update, context)
 
     if txt.isdigit() and 3 <= len(txt) <= 5:
         return await send_film_by_code(update, context, txt)
@@ -265,15 +258,8 @@ async def send_film_by_code(update, context, code):
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
 
-    # Сбрасываем флаг ожидания
     context.user_data.pop("waiting_code", None)
-
-    # Отправляем отдельное сообщение с кнопкой поиска
-    kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
-    await update.message.reply_text(
-        "Чтобы продолжить, нажмите кнопку «🔍 Поиск по коду».",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    await send_search_button(update, context)
 
 async def button_callback(update, context):
     query = update.callback_query
@@ -306,13 +292,11 @@ async def button_callback(update, context):
         context.user_data["waiting_code"] = True
         return await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
-# ========== Suppress всех ошибок Conflict ==========
 async def error_handler(update, context):
     if isinstance(context.error, Conflict):
-        return  # Полностью подавляем
+        return
     logger.exception("Ошибка:", exc_info=context.error)
 
-# ========== Точка входа ==========
 def main():
     if not TOKEN:
         logger.error("Нет TELEGRAM_TOKEN")
@@ -338,7 +322,7 @@ def main():
     try:
         app.run_polling()
     except Conflict:
-        return  # Полностью скрываем
+        return
     except Exception as e:
         logger.exception("Ошибка при запуске:", exc_info=e)
 
