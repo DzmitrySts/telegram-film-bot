@@ -241,16 +241,16 @@ async def handle_text(update, context):
     if txt.isdigit() and 3 <= len(txt) <= 5:
         return await send_film_by_code(update, context, txt)
     elif txt.isdigit():
-        return await update.message.reply_text("Код должен быть от 3 до 5 цифр!")
+        return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
     else:
-        return await update.message.reply_text("Код должен содержать только цифры!")
+        return await update.message.reply_text("❌ Код должен содержать только цифры!")
 
 async def send_film_by_code(update, context, code):
     films = load_json(FILMS_FILE)
     film = films.get(code)
 
     if not film:
-        return await update.message.reply_text("Нет фильма с таким кодом.")
+        return await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй другой код.")
 
     if "file_id" in film:
         await update.message.reply_video(film["file_id"], caption=film["title"])
