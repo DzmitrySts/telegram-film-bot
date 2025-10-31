@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 import os
-import json
 import logging
-import base64
-import requests
-import datetime
-from pathlib import Path
+import asyncpg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
 from telegram.ext import (
@@ -20,91 +16,61 @@ from telegram.ext import (
 # ========== Логирование ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-logging.getLogger("httpx").setLevel(logging.CRITICAL)
 logging.getLogger("telegram").setLevel(logging.CRITICAL)
 logging.getLogger("telegram.ext").setLevel(logging.CRITICAL)
-logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
-logging.getLogger("telegram.ext.Application").setLevel(logging.CRITICAL)
 
 # ========== Настройки ==========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
-
-FILMS_FILE = "films.json"
-USERS_FILE = "users.json"
-
-GITHUB_REPO = os.environ.get("GITHUB_REPO")
-GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 REQUIRED_CHANNELS = [
     ("@offmatch", "Offmatch")
 ]
 
-# ========== Работа с JSON ==========
-def load_json(filename):
-    try:
-        p = Path(filename)
-        if not p.exists():
-            p.write_text("{}", encoding="utf-8")
-            return {}
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        logger.exception(f"Ошибка чтения {filename}")
-        return {}
-
-def save_json(filename, data):
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except:
-        logger.exception(f"Ошибка записи {filename}")
-        return
-    commit_to_github(filename)
-
-def commit_to_github(filename):
-    if not all([GITHUB_REPO, GITHUB_TOKEN]):
-        return
-
-    try:
-        with open(filename, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}?ref={GITHUB_BRANCH}"
-        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-
-        r = requests.get(url, headers=headers)
-        sha = r.json().get("sha") if r.status_code == 200 else None
-
-        payload = {
-            "message": f"Обновление {filename} через бот",
-            "content": base64.b64encode(content.encode()).decode(),
-            "branch": GITHUB_BRANCH
-        }
-        if sha:
-            payload["sha"] = sha
-
-        requests.put(url, headers=headers, json=payload)
-    except Exception:
-        logger.exception(f"Ошибка коммита {filename}")
+# ========== Подключение к БД ==========
+async def get_db_pool():
+    return await asyncpg.create_pool(DATABASE_URL)
 
 # ========== Работа с пользователями ==========
-def load_users():
-    return load_json(USERS_FILE)
+async def add_user(pool, user_id, username, first_name):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO users(id, username, first_name)
+            VALUES($1, $2, $3)
+            ON CONFLICT (id) DO UPDATE
+            SET username = $2, first_name = $3
+        """, user_id, username, first_name)
 
-def save_users(users):
-    save_json(USERS_FILE, users)
+# ========== Работа с фильмами ==========
+async def add_film(pool, code, title, file_id):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO films(code, title, file_id)
+            VALUES($1, $2, $3)
+            ON CONFLICT (code) DO NOTHING
+        """, code, title, file_id)
 
-def add_user(user_id, username, first_name):
-    users = load_users()
-    uid = str(user_id)
-    if uid not in users:
-        users[uid] = {"username": username, "first_name": first_name}
-    else:
-        users[uid]["username"] = username
-        users[uid]["first_name"] = first_name
-    save_users(users)
+async def update_film_file(pool, code, file_id):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE films SET file_id=$1 WHERE code=$2", file_id, code)
+
+async def update_film_title(pool, code, new_title):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE films SET title=$1 WHERE code=$2", new_title, code)
+
+async def delete_film(pool, code):
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM films WHERE code=$1", code)
+        return result
+
+async def get_film(pool, code):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM films WHERE code=$1", code)
+
+async def list_all_films(pool):
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT code, title FROM films ORDER BY code")
 
 # ========== Кнопка поиска ==========
 async def send_search_button(update, context):
@@ -116,8 +82,9 @@ async def send_search_button(update, context):
 
 # ========== Хендлеры ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pool = context.bot_data["pool"]
     u = update.effective_user
-    add_user(u.id, u.username, u.first_name)
+    await add_user(pool, u.id, u.username, u.first_name)
 
     kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
     await update.message.reply_text(
@@ -128,24 +95,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    users = load_users()
-    await update.message.reply_text(f"👥 Уникальных пользователей: {len(users)}")
+    pool = context.bot_data["pool"]
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM users")
+    await update.message.reply_text(f"👥 Уникальных пользователей: {count}")
 
-async def list_films(update, context):
+async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
-    films = load_json(FILMS_FILE)
-    if not films:
+    pool = context.bot_data["pool"]
+    rows = await list_all_films(pool)
+    if not rows:
         return await update.message.reply_text("Пусто.")
-
-    txt = "\n".join([f"{k} — {v['title']}" for k, v in sorted(films.items())])
+    txt = "\n".join([f"{r['code']} — {r['title']}" for r in rows])
     await update.message.reply_text(txt)
 
 async def add_command(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-
     args = context.args
     if len(args) < 2:
         return await update.message.reply_text("Использование: /add <код> <название>")
@@ -154,8 +121,9 @@ async def add_command(update, context):
     if not code.isdigit() or not 3 <= len(code) <= 5:
         return await update.message.reply_text("Код должен быть от 3 до 5 цифр!")
 
-    films = load_json(FILMS_FILE)
-    if code in films:
+    pool = context.bot_data["pool"]
+    film = await get_film(pool, code)
+    if film:
         return await update.message.reply_text("Такой код уже существует!")
 
     context.user_data["add_code"] = code
@@ -166,73 +134,53 @@ async def del_command(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     code = context.args[0]
-
-    films = load_json(FILMS_FILE)
-    if code in films:
-        del films[code]
-        save_json(FILMS_FILE, films)
-        return await update.message.reply_text("✅ Удалено.")
-
-    await update.message.reply_text("❌ Кода нет.")
+    pool = context.bot_data["pool"]
+    result = await delete_film(pool, code)
+    if "DELETE 0" in result:
+        await update.message.reply_text("❌ Кода нет.")
+    else:
+        await update.message.reply_text("✅ Удалено.")
 
 async def edit_name(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-
     args = context.args
     if len(args) < 2:
         return await update.message.reply_text("Использование: /editn <код> <новое название>")
-
     code = args[0]
     new_title = " ".join(args[1:])
-    films = load_json(FILMS_FILE)
-
-    if code not in films:
-        return await update.message.reply_text("Нет такого кода.")
-
-    films[code]["title"] = new_title
-    save_json(FILMS_FILE, films)
+    pool = context.bot_data["pool"]
+    await update_film_title(pool, code, new_title)
     await update.message.reply_text("✅ Название обновлено.")
 
 async def edit_media(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
-
     if not args:
         return await update.message.reply_text("Использование: /editm <код>")
-
-    code = args[0]
-    films = load_json(FILMS_FILE)
-    if code not in films:
-        return await update.message.reply_text("❌ Кода нет.")
-
-    context.user_data["edit_code"] = code
+    context.user_data["edit_code"] = args[0]
     await update.message.reply_text("Отправьте видео.")
 
 async def handle_video(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-
-    films = load_json(FILMS_FILE)
-
+    pool = context.bot_data["pool"]
     if "edit_code" in context.user_data:
         code = context.user_data["edit_code"]
-        films[code]["file_id"] = update.message.video.file_id
-        save_json(FILMS_FILE, films)
+        await update_film_file(pool, code, update.message.video.file_id)
         context.user_data.clear()
         return await update.message.reply_text("✅ Видео обновлено.")
-
     if "add_code" in context.user_data:
         code = context.user_data["add_code"]
         title = context.user_data["add_title"]
-        films[code] = {"title": title, "file_id": update.message.video.file_id}
-        save_json(FILMS_FILE, films)
+        await add_film(pool, code, title, update.message.video.file_id)
         context.user_data.clear()
         return await update.message.reply_text("✅ Фильм добавлен.")
 
 async def handle_text(update, context):
-    add_user(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
+    pool = context.bot_data["pool"]
+    await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
 
     txt = update.message.text.strip()
     if not context.user_data.get("waiting_code"):
@@ -246,27 +194,22 @@ async def handle_text(update, context):
         return await update.message.reply_text("❌ Код должен содержать только цифры!")
 
 async def send_film_by_code(update, context, code):
-    films = load_json(FILMS_FILE)
-    film = films.get(code)
-
+    pool = context.bot_data["pool"]
+    film = await get_film(pool, code)
     if not film:
-        return await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй другой код.")
-
-    if "file_id" in film:
+        return await update.message.reply_text("❌ Нет фильма с таким кодом.")
+    if film["file_id"] is not None:
         await update.message.reply_video(film["file_id"], caption=film["title"])
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
-
     context.user_data.pop("waiting_code", None)
     await send_search_button(update, context)
 
 async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
     not_sub = []
-
     for chan, name in REQUIRED_CHANNELS:
         try:
             member = await context.bot.get_chat_member(chan, user_id)
@@ -296,12 +239,16 @@ async def error_handler(update, context):
         return
     logger.exception("Ошибка:", exc_info=context.error)
 
+# ========== MAIN ==========
 def main():
-    if not TOKEN:
-        logger.error("Нет TELEGRAM_TOKEN")
+    if not TOKEN or not DATABASE_URL:
+        logger.error("Нет TELEGRAM_TOKEN или DATABASE_URL")
         return
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    async def on_startup(app):
+        app.bot_data["pool"] = await get_db_pool()
+
+    app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
@@ -313,11 +260,9 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(button_callback))
-
     app.add_error_handler(error_handler)
 
     logger.info("✅ Бот запущен.")
-
     try:
         app.run_polling()
     except Conflict:
