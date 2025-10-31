@@ -5,6 +5,7 @@ import logging
 import base64
 import requests
 import datetime
+import asyncio
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
@@ -21,13 +22,6 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ✅ Отключаем шумные логгеры, которые пишут ERROR при 409-Conflict
-logging.getLogger("httpx").setLevel(logging.CRITICAL)
-logging.getLogger("telegram").setLevel(logging.CRITICAL)
-logging.getLogger("telegram.ext").setLevel(logging.CRITICAL)
-logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
-logging.getLogger("telegram.ext.Application").setLevel(logging.CRITICAL)
-
 # ========== Настройки ==========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
@@ -39,12 +33,15 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
+# Railway URL
+WEBHOOK_URL = f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}/webhook"
+
 # Обязательный канал
 REQUIRED_CHANNELS = [
     ("@offmatch", "Offmatch")
 ]
 
-# ========== Работа с JSON-файлами ==========
+# ========== Работа с JSON ==========
 def load_json(filename):
     try:
         p = Path(filename)
@@ -65,7 +62,7 @@ def save_json(filename, data):
         return
     commit_to_github(filename)
 
-# ========== Коммит файлов ==========
+# ========== Коммит в GitHub ==========
 def commit_to_github(filename):
     if not all([GITHUB_REPO, GITHUB_TOKEN]):
         return
@@ -92,7 +89,7 @@ def commit_to_github(filename):
     except Exception:
         logger.exception(f"Ошибка коммита {filename}")
 
-# ========== Работа с пользователями ==========
+# ========== USERS.JSON ==========
 def load_users():
     return load_json(USERS_FILE)
 
@@ -118,6 +115,13 @@ def add_user(user_id, username, first_name):
 
     save_users(users)
 
+# ========== FILMS.JSON ==========
+def load_films():
+    return load_json(FILMS_FILE)
+
+def save_films(films):
+    save_json(FILMS_FILE, films)
+
 # ========== Хендлеры ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -129,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     users = load_users()
@@ -138,11 +142,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_films(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-
-    films = load_json(FILMS_FILE)
+    films = load_films()
     if not films:
         return await update.message.reply_text("Пусто.")
-
     txt = "\n".join([f"{k} — {v['title']}" for k, v in sorted(films.items())])
     await update.message.reply_text(txt)
 
@@ -158,25 +160,24 @@ async def add_command(update, context):
     if not code.isdigit() or not 3 <= len(code) <= 5:
         return await update.message.reply_text("Код должен быть от 3 до 5 цифр!")
 
-    films = load_json(FILMS_FILE)
+    films = load_films()
     if code in films:
         return await update.message.reply_text("Такой код уже существует!")
 
     context.user_data["add_code"] = code
     context.user_data["add_title"] = " ".join(args[1:])
-    await update.message.reply_text("Ок, отправьте видео.")
+    await update.message.reply_text("Отправьте видео.")
 
 async def del_command(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     code = context.args[0]
 
-    films = load_json(FILMS_FILE)
+    films = load_films()
     if code in films:
         del films[code]
-        save_json(FILMS_FILE, films)
+        save_films(films)
         return await update.message.reply_text("✅ Удалено.")
-
     await update.message.reply_text("❌ Кода нет.")
 
 async def edit_name(update, context):
@@ -189,51 +190,46 @@ async def edit_name(update, context):
 
     code = args[0]
     new_title = " ".join(args[1:])
-    films = load_json(FILMS_FILE)
+    films = load_films()
 
     if code not in films:
         return await update.message.reply_text("Нет такого кода.")
 
     films[code]["title"] = new_title
-    save_json(FILMS_FILE, films)
+    save_films(films)
     await update.message.reply_text("✅ Название обновлено.")
 
 async def edit_media(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     args = context.args
-
     if not args:
         return await update.message.reply_text("Использование: /editm <код>")
-
     code = args[0]
-    films = load_json(FILMS_FILE)
+    films = load_films()
     if code not in films:
         return await update.message.reply_text("❌ Кода нет.")
-
     context.user_data["edit_code"] = code
-    await update.message.reply_text("Отправьте видео.")
+    await update.message.reply_text("Отправьте новое видео.")
 
 async def handle_video(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    films = load_json(FILMS_FILE)
+    films = load_films()
 
-    # Редактирование
     if "edit_code" in context.user_data:
         code = context.user_data["edit_code"]
         films[code]["file_id"] = update.message.video.file_id
-        save_json(FILMS_FILE, films)
+        save_films(films)
         context.user_data.clear()
         return await update.message.reply_text("✅ Видео обновлено.")
 
-    # Добавление
     if "add_code" in context.user_data:
         code = context.user_data["add_code"]
         title = context.user_data["add_title"]
         films[code] = {"title": title, "file_id": update.message.video.file_id}
-        save_json(FILMS_FILE, films)
+        save_films(films)
         context.user_data.clear()
         return await update.message.reply_text("✅ Фильм добавлен.")
 
@@ -241,6 +237,7 @@ async def handle_text(update, context):
     add_user(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
 
     txt = update.message.text.strip()
+
     if not context.user_data.get("waiting_code"):
         kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
         return await update.message.reply_text(
@@ -256,7 +253,7 @@ async def handle_text(update, context):
         return await update.message.reply_text("Код должен содержать только цифры!")
 
 async def send_film_by_code(update, context, code):
-    films = load_json(FILMS_FILE)
+    films = load_films()
     film = films.get(code)
 
     if not film:
@@ -278,8 +275,8 @@ async def button_callback(update, context):
 
     for chan, name in REQUIRED_CHANNELS:
         try:
-            member = await context.bot.get_chat_member(chan, user_id)
-            if member.status not in ("member", "creator", "administrator"):
+            m = await context.bot.get_chat_member(chan, user_id)
+            if m.status not in ("member", "creator", "administrator"):
                 not_sub.append(name)
         except:
             not_sub.append(name)
@@ -300,41 +297,47 @@ async def button_callback(update, context):
         context.user_data["waiting_code"] = True
         return await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
-# ========== Suppress всех ошибок Conflict ==========
+# ========== Глобальный обработчик ошибок ==========
 async def error_handler(update, context):
     if isinstance(context.error, Conflict):
-        return  # Полностью подавляем
+        return
     logger.exception("Ошибка:", exc_info=context.error)
 
 # ========== Точка входа ==========
 def main():
     if not TOKEN:
-        logger.error("Нет TELEGRAM_TOKEN")
+        logger.error("TELEGRAM_TOKEN не задан.")
         return
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    async def runner():
+        app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("list", list_films))
-    app.add_handler(CommandHandler("add", add_command))
-    app.add_handler(CommandHandler("del", del_command))
-    app.add_handler(CommandHandler("editn", edit_name))
-    app.add_handler(CommandHandler("editm", edit_media))
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(button_callback))
+        # Хендлеры
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("stats", stats))
+        app.add_handler(CommandHandler("list", list_films))
+        app.add_handler(CommandHandler("add", add_command))
+        app.add_handler(CommandHandler("del", del_command))
+        app.add_handler(CommandHandler("editn", edit_name))
+        app.add_handler(CommandHandler("editm", edit_media))
+        app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        app.add_handler(CallbackQueryHandler(button_callback))
+        app.add_error_handler(error_handler)
 
-    app.add_error_handler(error_handler)
+        # Устанавливаем webhook
+        logger.info(f"🔗 Устанавливаю Webhook: {WEBHOOK_URL}")
+        await app.bot.set_webhook(WEBHOOK_URL)
 
-    logger.info("✅ Бот запущен (polling без ERROR/409).")
+        # Запускаем сервер webhook
+        logger.info("✅ Webhook сервер запущен.")
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", 8080)),
+            webhook_url=WEBHOOK_URL
+        )
 
-    try:
-        app.run_polling()
-    except Conflict:
-        return  # Полностью скрываем
-    except Exception as e:
-        logger.exception("Ошибка при запуске:", exc_info=e)
+    asyncio.run(runner())
 
 
 if __name__ == "__main__":
