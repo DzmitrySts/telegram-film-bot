@@ -229,8 +229,7 @@ async def handle_video(update, context):
         films[code] = {"title": title, "file_id": update.message.video.file_id}
         save_json(FILMS_FILE, films)
         context.user_data.clear()
-        await update.message.reply_text("✅ Фильм добавлен.")
-        return await send_search_button(update, context)
+        return await update.message.reply_text("✅ Фильм добавлен.")
 
 async def handle_text(update, context):
     add_user(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
