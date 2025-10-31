@@ -125,7 +125,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
     await update.message.reply_text(
-        "Привет! 👋\nНажмите кнопку «🔍 Поиск по коду».",
+        "Привет! 👋\nНажмите кнопку «🔍 Поиск по коду» для поиска фильма.",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -244,7 +244,7 @@ async def handle_text(update, context):
     if not context.user_data.get("waiting_code"):
         kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
         return await update.message.reply_text(
-            "❗ Нажмите кнопку поиска.",
+            "❗ Сначала нажмите кнопку «🔍 Поиск по коду»",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
@@ -327,7 +327,7 @@ def main():
 
     app.add_error_handler(error_handler)
 
-    logger.info("✅ Бот запущен (polling без ERROR/409).")
+    logger.info("✅ Бот запущен.")
 
     try:
         app.run_polling()
