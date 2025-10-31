@@ -5,7 +5,6 @@ import logging
 import base64
 import requests
 import datetime
-import asyncio
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
@@ -33,13 +32,10 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
-# Railway URL
-WEBHOOK_URL = f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}/webhook"
+RAILWAY_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+WEBHOOK_URL = f"https://{RAILWAY_DOMAIN}/webhook" if RAILWAY_DOMAIN else None
 
-# Обязательный канал
-REQUIRED_CHANNELS = [
-    ("@offmatch", "Offmatch")
-]
+REQUIRED_CHANNELS = [("@offmatch", "Offmatch")]
 
 # ========== Работа с JSON ==========
 def load_json(filename):
@@ -62,21 +58,16 @@ def save_json(filename, data):
         return
     commit_to_github(filename)
 
-# ========== Коммит в GitHub ==========
 def commit_to_github(filename):
     if not all([GITHUB_REPO, GITHUB_TOKEN]):
         return
-
     try:
         with open(filename, "r", encoding="utf-8") as f:
             content = f.read()
-
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}?ref={GITHUB_BRANCH}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-
         r = requests.get(url, headers=headers)
         sha = r.json().get("sha") if r.status_code == 200 else None
-
         payload = {
             "message": f"Обновление {filename} через бот",
             "content": base64.b64encode(content.encode()).decode(),
@@ -84,7 +75,6 @@ def commit_to_github(filename):
         }
         if sha:
             payload["sha"] = sha
-
         requests.put(url, headers=headers, json=payload)
     except Exception:
         logger.exception(f"Ошибка коммита {filename}")
@@ -100,19 +90,12 @@ def add_user(user_id, username, first_name):
     users = load_users()
     uid = str(user_id)
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
     if uid not in users:
-        users[uid] = {
-            "username": username,
-            "first_name": first_name,
-            "first_seen": now,
-            "last_seen": now
-        }
+        users[uid] = {"username": username, "first_name": first_name, "first_seen": now, "last_seen": now}
     else:
         users[uid]["username"] = username
         users[uid]["first_name"] = first_name
         users[uid]["last_seen"] = now
-
     save_users(users)
 
 # ========== FILMS.JSON ==========
@@ -126,7 +109,6 @@ def save_films(films):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     add_user(u.id, u.username, u.first_name)
-
     kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
     await update.message.reply_text(
         "Привет! 👋\nНажмите кнопку «🔍 Поиск по коду».",
@@ -151,19 +133,15 @@ async def list_films(update, context):
 async def add_command(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-
     args = context.args
     if len(args) < 2:
         return await update.message.reply_text("Использование: /add <код> <название>")
-
     code = args[0]
     if not code.isdigit() or not 3 <= len(code) <= 5:
         return await update.message.reply_text("Код должен быть от 3 до 5 цифр!")
-
     films = load_films()
     if code in films:
         return await update.message.reply_text("Такой код уже существует!")
-
     context.user_data["add_code"] = code
     context.user_data["add_title"] = " ".join(args[1:])
     await update.message.reply_text("Отправьте видео.")
@@ -172,7 +150,6 @@ async def del_command(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
     code = context.args[0]
-
     films = load_films()
     if code in films:
         del films[code]
@@ -183,18 +160,14 @@ async def del_command(update, context):
 async def edit_name(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-
     args = context.args
     if len(args) < 2:
         return await update.message.reply_text("Использование: /editn <код> <новое название>")
-
     code = args[0]
     new_title = " ".join(args[1:])
     films = load_films()
-
     if code not in films:
         return await update.message.reply_text("Нет такого кода.")
-
     films[code]["title"] = new_title
     save_films(films)
     await update.message.reply_text("✅ Название обновлено.")
@@ -215,16 +188,13 @@ async def edit_media(update, context):
 async def handle_video(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-
     films = load_films()
-
     if "edit_code" in context.user_data:
         code = context.user_data["edit_code"]
         films[code]["file_id"] = update.message.video.file_id
         save_films(films)
         context.user_data.clear()
         return await update.message.reply_text("✅ Видео обновлено.")
-
     if "add_code" in context.user_data:
         code = context.user_data["add_code"]
         title = context.user_data["add_title"]
@@ -235,16 +205,10 @@ async def handle_video(update, context):
 
 async def handle_text(update, context):
     add_user(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
-
     txt = update.message.text.strip()
-
     if not context.user_data.get("waiting_code"):
         kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
-        return await update.message.reply_text(
-            "❗ Нажмите кнопку поиска.",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-
+        return await update.message.reply_text("❗ Нажмите кнопку поиска.", reply_markup=InlineKeyboardMarkup(kb))
     if txt.isdigit() and 3 <= len(txt) <= 5:
         return await send_film_by_code(update, context, txt)
     elif txt.isdigit():
@@ -255,24 +219,19 @@ async def handle_text(update, context):
 async def send_film_by_code(update, context, code):
     films = load_films()
     film = films.get(code)
-
     if not film:
         return await update.message.reply_text("Нет фильма с таким кодом.")
-
     if "file_id" in film:
         await update.message.reply_video(film["file_id"], caption=film["title"])
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
-
     context.user_data.pop("waiting_code", None)
 
 async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
     not_sub = []
-
     for chan, name in REQUIRED_CHANNELS:
         try:
             m = await context.bot.get_chat_member(chan, user_id)
@@ -280,24 +239,20 @@ async def button_callback(update, context):
                 not_sub.append(name)
         except:
             not_sub.append(name)
-
     buttons = [[InlineKeyboardButton(name, url=f"https://t.me/{chan[1:]}")] for chan, name in REQUIRED_CHANNELS]
     buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
     markup = InlineKeyboardMarkup(buttons)
-
     if query.data == "search_code":
         if not_sub:
             return await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=markup)
         context.user_data["waiting_code"] = True
         return await query.message.reply_text("Введите код фильма (3–5 цифр):")
-
     if query.data == "subscribed":
         if not_sub:
             return await query.message.reply_text("❌ Вы ещё не подписались.")
         context.user_data["waiting_code"] = True
         return await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
-# ========== Глобальный обработчик ошибок ==========
 async def error_handler(update, context):
     if isinstance(context.error, Conflict):
         return
@@ -309,36 +264,31 @@ def main():
         logger.error("TELEGRAM_TOKEN не задан.")
         return
 
-    async def runner():
-        app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
-        # Хендлеры
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("stats", stats))
-        app.add_handler(CommandHandler("list", list_films))
-        app.add_handler(CommandHandler("add", add_command))
-        app.add_handler(CommandHandler("del", del_command))
-        app.add_handler(CommandHandler("editn", edit_name))
-        app.add_handler(CommandHandler("editm", edit_media))
-        app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-        app.add_handler(CallbackQueryHandler(button_callback))
-        app.add_error_handler(error_handler)
+    # Хендлеры
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("list", list_films))
+    app.add_handler(CommandHandler("add", add_command))
+    app.add_handler(CommandHandler("del", del_command))
+    app.add_handler(CommandHandler("editn", edit_name))
+    app.add_handler(CommandHandler("editm", edit_media))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_error_handler(error_handler)
 
-        # Устанавливаем webhook
+    if WEBHOOK_URL:
         logger.info(f"🔗 Устанавливаю Webhook: {WEBHOOK_URL}")
-        await app.bot.set_webhook(WEBHOOK_URL)
-
-        # Запускаем сервер webhook
-        logger.info("✅ Webhook сервер запущен.")
-        await app.run_webhook(
+        app.run_webhook(
             listen="0.0.0.0",
             port=int(os.environ.get("PORT", 8080)),
             webhook_url=WEBHOOK_URL
         )
-
-    asyncio.run(runner())
-
+    else:
+        logger.info("❗ WEBHOOK_URL не задан, запускаем polling")
+        app.run_polling()
 
 if __name__ == "__main__":
     main()
