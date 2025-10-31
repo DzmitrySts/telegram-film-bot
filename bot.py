@@ -108,13 +108,11 @@ def add_user(user_id, username, first_name):
         users[uid] = {
             "username": username,
             "first_name": first_name,
-            "first_seen": now,
-            "last_seen": now
+            "first_seen": now
         }
     else:
         users[uid]["username"] = username
         users[uid]["first_name"] = first_name
-        users[uid]["last_seen"] = now
 
     save_users(users)
 
