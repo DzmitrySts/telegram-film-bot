@@ -284,23 +284,15 @@ async def button_callback(update, context):
             await query.message.reply_text("Выберите озвучку:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
-    # ========== Исправленный блок выбора озвучки ==========
+    # Выбор озвучки
     if 'trans_map' in context.user_data:
         t_name = context.user_data['trans_map'].get(data)
         if t_name:
             context.user_data['selected_translator'] = t_name
             rezka_obj = context.user_data['rezka_obj']
-
-            # Получаем ID переводчика по имени
-            translator_id = rezka_obj.translators_names.get(t_name, {}).get("id")
-            if translator_id is None:
-                return await query.message.reply_text("❌ Не удалось найти перевод.")
-
-            # Получаем поток по ID переводчика
-            stream = rezka_obj.getStream(translation=translator_id)
+            stream = rezka_obj.getStream(translation=t_name)
             if not stream.videos:
                 return await query.message.reply_text("❌ Видео недоступно.")
-
             # Выбор качества (первые 3)
             kb = []
             for q in list(stream.videos.keys())[:3]:
