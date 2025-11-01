@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 import os
 import logging
+import asyncpg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
 )
-import asyncpg
 from HdRezkaApi.search import HdRezkaSearch
 from HdRezkaApi import HdRezkaApi
 import urllib.parse
 
-# ====== Логирование ======
+# ===== Логирование =====
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logging.getLogger("telegram").setLevel(logging.CRITICAL)
 logging.getLogger("telegram.ext").setLevel(logging.CRITICAL)
 
-# ====== Настройки ======
+# ===== Настройки =====
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# ====== Подключение к БД ======
+# ===== Подключение к БД =====
 async def get_db_pool():
     return await asyncpg.create_pool(DATABASE_URL)
 
-# ====== Работа с пользователями ======
+# ===== Работа с пользователями =====
 async def add_user(pool, user_id, username, first_name):
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -36,18 +36,43 @@ async def add_user(pool, user_id, username, first_name):
             SET username = $2, first_name = $3
         """, user_id, username, first_name)
 
-# ====== Работа с фильмами ======
+# ===== Работа с фильмами =====
+async def add_film(pool, code, title, file_id):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO films(code, title, file_id)
+            VALUES($1, $2, $3)
+            ON CONFLICT (code) DO NOTHING
+        """, code, title, file_id)
+
+async def update_film_file(pool, code, file_id):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE films SET file_id=$1 WHERE code=$2", file_id, code)
+
+async def update_film_title(pool, code, new_title):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE films SET title=$1 WHERE code=$2", new_title, code)
+
+async def delete_film(pool, code):
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM films WHERE code=$1", code)
+        return result
+
 async def get_film(pool, code):
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM films WHERE code=$1", code)
 
-# ====== HdRezka ======
+async def list_all_films(pool):
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT code, title FROM films ORDER BY code")
+
+# ===== HdRezka =====
 async def search_hdrezka(query: str):
     search = HdRezkaSearch("https://hdrezka.ag/")
     results = search(query, find_all=False)
     if not results:
         return None
-    return results[0]  # {'title':..., 'url':..., 'image':..., 'rating':...}
+    return results[0]
 
 async def get_hdrezka_film(url: str):
     rezka = HdRezkaApi(url)
@@ -70,7 +95,7 @@ def build_hdrezka_buttons(rezka_obj):
     # озвучки
     for t_name in rezka_obj.translators_names.keys():
         kb.append([InlineKeyboardButton(t_name, callback_data=f"hd_translator_{urllib.parse.quote(t_name)}")])
-    # качества (для фильма берем первый поток)
+    # качества (берем первый поток)
     try:
         first_stream = rezka_obj.getStream()
         kb.append([InlineKeyboardButton(q, callback_data=f"hd_quality_{q}") for q in first_stream.videos.keys()])
@@ -78,30 +103,36 @@ def build_hdrezka_buttons(rezka_obj):
         pass
     return InlineKeyboardMarkup(kb)
 
-# ====== Хендлеры ======
+# ===== Кнопка поиска =====
+async def send_search_button(update, context):
+    kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")],
+          [InlineKeyboardButton("🎬 Поиск по названию", callback_data="search_hd")]]
+    await update.message.reply_text("Выберите способ поиска:", reply_markup=InlineKeyboardMarkup(kb))
+
+# ===== Хендлеры =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pool = context.bot_data["pool"]
     u = update.effective_user
     await add_user(pool, u.id, u.username, u.first_name)
-    kb = [[InlineKeyboardButton("🔍 Поиск фильма", callback_data="search_hd")]]
-    await update.message.reply_text(
-        "Привет! 👋\nНажмите кнопку «🔍 Поиск фильма».",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    await send_search_button(update, context)
 
+# ===== Текстовые сообщения =====
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pool = context.bot_data["pool"]
     await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
     txt = update.message.text.strip()
-    # Если это код (число 3-5 цифр)
-    if txt.isdigit() and 3 <= len(txt) <= 5:
+
+    # ===== Поиск по коду =====
+    if context.user_data.get("waiting_code") and txt.isdigit() and 3 <= len(txt) <= 5:
         film = await get_film(pool, txt)
         if film and film['file_id']:
             await update.message.reply_video(film['file_id'], caption=film['title'])
         else:
             await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй название.")
+        context.user_data.pop("waiting_code", None)
         return
-    # Иначе ищем по HdRezka
+
+    # ===== Поиск по HdRezka =====
     rezka_result = await search_hdrezka(txt)
     if not rezka_result:
         await update.message.reply_text("❌ Фильм не найден.")
@@ -116,10 +147,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_hdrezka_buttons(rezka_obj)
     )
 
+# ===== CallbackQuery =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    # ===== Кнопки поиска =====
+    if data == "search_code":
+        context.user_data["waiting_code"] = True
+        await query.message.reply_text("Введите код фильма (3–5 цифр):")
+        return
+    if data == "search_hd":
+        await query.message.reply_text("Введите название фильма для поиска:")
+        return
+
+    # ===== Кнопки HdRezka =====
     if 'hd_translator_' in data:
         translator = urllib.parse.unquote(data.split('_', 2)[2])
         context.user_data['translator'] = translator
@@ -134,10 +177,63 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text("❌ Объект фильма не найден.")
 
+# ===== Админ-команды =====
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    pool = context.bot_data["pool"]
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM users")
+    await update.message.reply_text(f"👥 Уникальных пользователей: {count}")
+
+async def list_films(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    pool = context.bot_data["pool"]
+    rows = await list_all_films(pool)
+    if not rows:
+        return await update.message.reply_text("Пусто.")
+    txt = "\n".join([f"{r['code']} — {r['title']}" for r in rows])
+    await update.message.reply_text(txt)
+
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args
+    if len(args) < 2:
+        return await update.message.reply_text("Использование: /add <код> <название>")
+    code = args[0]
+    if not code.isdigit() or not 3 <= len(code) <= 5:
+        return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
+    pool = context.bot_data["pool"]
+    film = await get_film(pool, code)
+    if film:
+        return await update.message.reply_text("❌ Такой код уже существует!")
+    context.user_data["add_code"] = code
+    context.user_data["add_title"] = " ".join(args[1:])
+    await update.message.reply_text("Ок, отправьте видео.")
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    pool = context.bot_data["pool"]
+    if "edit_code" in context.user_data:
+        code = context.user_data["edit_code"]
+        await update_film_file(pool, code, update.message.video.file_id)
+        context.user_data.clear()
+        return await update.message.reply_text("✅ Видео обновлено.")
+    if "add_code" in context.user_data:
+        code = context.user_data["add_code"]
+        title = context.user_data["add_title"]
+        await add_film(pool, code, title, update.message.video.file_id)
+        context.user_data.clear()
+        return await update.message.reply_text("✅ Фильм добавлен.")
+
+# ===== Ошибки =====
 async def error_handler(update, context):
     logger.exception("Ошибка:", exc_info=context.error)
 
-# ====== MAIN ======
+# ===== MAIN =====
 def main():
     if not TOKEN or not DATABASE_URL:
         logger.error("Нет TELEGRAM_TOKEN или DATABASE_URL")
@@ -147,9 +243,16 @@ def main():
         app.bot_data["pool"] = await get_db_pool()
 
     app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
+    # Основные
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(CallbackQueryHandler(button_callback))
+    # Админ
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("list", list_films))
+    app.add_handler(CommandHandler("add", add_command))
+    # Ошибки
     app.add_error_handler(error_handler)
 
     logger.info("✅ Бот запущен.")
