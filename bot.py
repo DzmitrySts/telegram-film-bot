@@ -3,6 +3,9 @@ import os
 import logging
 import asyncpg
 import hashlib
+import re
+import json
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
 from telegram.ext import (
@@ -93,6 +96,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pool = context.bot_data["pool"]
     u = update.effective_user
     await add_user(pool, u.id, u.username, u.first_name)
+
     await send_search_button(update, context)
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,7 +191,6 @@ async def handle_text(update, context):
     await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
     txt = update.message.text.strip()
 
-    # Если ожидаем код фильма
     if context.user_data.get("waiting_code"):
         if txt.isdigit() and 3 <= len(txt) <= 5:
             return await send_film_by_code(update, context, txt)
@@ -196,12 +199,11 @@ async def handle_text(update, context):
         else:
             return await update.message.reply_text("❌ Код должен содержать только цифры!")
 
-    # Если ожидаем поиск по названию
     if context.user_data.get("waiting_name"):
         search = HdRezkaSearch("https://hdrezka.ag/")(txt)
         if not search:
             return await update.message.reply_text("❌ Фильмы не найдены.")
-        results = search[:5]  # максимум 5 вариантов
+        results = search[:5]
         kb = []
         name_map = {}
         for r in results:
@@ -239,7 +241,6 @@ async def button_callback(update, context):
     user_id = query.from_user.id
     data = query.data
 
-    # Проверка подписки на каналы
     not_sub = []
     for chan, name in REQUIRED_CHANNELS:
         try:
@@ -255,17 +256,14 @@ async def button_callback(update, context):
         if data in ("search_code", "search_name", "subscribed"):
             return await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=markup)
 
-    # Поиск по коду
     if data == "search_code":
         context.user_data["waiting_code"] = True
         return await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
-    # Поиск по названию
     if data == "search_name":
         context.user_data["waiting_name"] = True
         return await query.message.reply_text("Введите название фильма:")
 
-    # Выбор фильма из поиска по названию
     if 'name_map' in context.user_data:
         url = context.user_data['name_map'].get(data)
         if url:
@@ -282,30 +280,39 @@ async def button_callback(update, context):
             await query.message.reply_text("Выберите озвучку:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
-    # Выбор озвучки и отправка ссылки на Rezka
+    # ========= Парсим страницу HDRezka для ссылки на mp4 ==========
     if 'trans_map' in context.user_data:
         t_name = context.user_data['trans_map'].get(data)
         if t_name:
             rezka_obj = context.user_data['rezka_obj']
-            context.user_data['selected_translator'] = t_name
-            translator_id = rezka_obj.translators_names.get(t_name, {}).get("id")
-            if translator_id is None:
-                return await query.message.reply_text("❌ Не удалось найти перевод.")
-            film_url = f"{rezka_obj.url}?translator={translator_id}"
-            await query.message.reply_text(f"🎬 Вот ваша ссылка на фильм:\n{film_url}")
-            context.user_data.clear()
-            await send_search_button(update, context)
-            return
+            film_url = rezka_obj.url
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.get(film_url)
+                    html = r.text
 
-    # Выбор качества (для фильмов из базы, если есть)
-    if 'quality_map' in context.user_data:
-        q = context.user_data['quality_map'].get(data)
-        if q:
-            stream = context.user_data['stream']
-            url = stream(q)
-            await query.message.reply_text(f"Вот ваша ссылка на видео ({q}):\n{url}")
-            context.user_data.clear()
-            await send_search_button(update, context)
+                match = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*\});', html)
+                if match:
+                    data_json = json.loads(match.group(1))
+                    streams = data_json.get("videos", {}).get("list", [])
+                    url_found = None
+                    for s in streams:
+                        if str(s.get("translator_id")) == str(rezka_obj.translators_names[t_name]["id"]):
+                            videos = s.get("files", {})
+                            if videos:
+                                url_found = list(videos.values())[0]
+                                break
+                    if url_found:
+                        await query.message.reply_text(f"🎬 Вот ваша ссылка на фильм:\n{url_found}")
+                        context.user_data.clear()
+                        await send_search_button(update, context)
+                    else:
+                        await query.message.reply_text("❌ Не удалось получить ссылку на видео.")
+                else:
+                    await query.message.reply_text("❌ Не удалось распарсить страницу фильма.")
+            except Exception as e:
+                logger.exception("Ошибка при получении видео:", exc_info=e)
+                await query.message.reply_text("❌ Ошибка при получении видео.")
             return
 
 async def error_handler(update, context):
@@ -324,7 +331,6 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
 
-    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("list", list_films))
@@ -333,11 +339,9 @@ def main():
     app.add_handler(CommandHandler("editn", edit_name))
     app.add_handler(CommandHandler("editm", edit_media))
 
-    # Сообщения
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Callback
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
 
