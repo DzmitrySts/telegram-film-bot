@@ -119,16 +119,13 @@ async def add_command(update, context):
     args = context.args
     if len(args) < 2:
         return await update.message.reply_text("Использование: /add <код> <название>")
-
     code = args[0]
     if not code.isdigit() or not 3 <= len(code) <= 5:
         return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
-
     pool = context.bot_data["pool"]
     film = await get_film(pool, code)
     if film:
         return await update.message.reply_text("❌ Такой код уже существует!")
-
     context.user_data["add_code"] = code
     context.user_data["add_title"] = " ".join(args[1:])
     await update.message.reply_text("Ок, отправьте видео.")
@@ -221,10 +218,7 @@ async def send_film_by_code(update, context, code):
         await update.message.reply_video(film["file_id"], caption=film["title"])
         user_id = update.effective_user.id
         async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO user_films(user_id, film_code)
-                VALUES($1, $2)
-            """, user_id, code)
+            await conn.execute("INSERT INTO user_films(user_id, film_code) VALUES($1, $2)", user_id, code)
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
     context.user_data.pop("waiting_code", None)
@@ -280,7 +274,7 @@ async def button_callback(update, context):
             await query.message.reply_text("Выберите озвучку:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
-    # Выбор озвучки и получение видео из HdRezkaApi
+    # Выбор озвучки и получение видео
     if 'trans_map' in context.user_data:
         t_name = context.user_data['trans_map'].get(data)
         if t_name:
@@ -294,6 +288,8 @@ async def button_callback(update, context):
                 return await query.message.reply_text("❌ Видео недоступно.")
             if not stream.videos:
                 return await query.message.reply_text("❌ Видео недоступно.")
+
+            # Выбор качества
             kb = []
             quality_map = {}
             for q in list(stream.videos.keys())[:3]:
@@ -305,13 +301,16 @@ async def button_callback(update, context):
             await query.message.reply_text("Выберите качество:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
-    # Выбор качества
+    # Выбор качества и отправка видео
     if 'quality_map' in context.user_data:
         q = context.user_data['quality_map'].get(data)
         if q:
             stream = context.user_data['stream']
             url = stream(q)
-            await query.message.reply_text(f"Вот ваша ссылка на видео ({q}):\n{url}")
+            try:
+                await query.message.reply_video(video=url, caption=f"Вот ваше видео ({q})")
+            except Exception:
+                await query.message.reply_text(f"Не удалось отправить видео напрямую, вот ссылка:\n{url}")
             context.user_data.clear()
             await send_search_button(update, context)
             return
@@ -332,6 +331,7 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
 
+    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("list", list_films))
@@ -340,9 +340,11 @@ def main():
     app.add_handler(CommandHandler("editn", edit_name))
     app.add_handler(CommandHandler("editm", edit_media))
 
+    # Сообщения
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
+    # Callback
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
 
