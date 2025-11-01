@@ -7,6 +7,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
 )
+from telegram.error import Conflict
 from HdRezkaApi.search import HdRezkaSearch
 from HdRezkaApi import HdRezkaApi
 import urllib.parse
@@ -21,6 +22,10 @@ logging.getLogger("telegram.ext").setLevel(logging.CRITICAL)
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+REQUIRED_CHANNELS = [
+    ("@offmatch", "Offmatch")
+]
 
 # ===== Подключение к БД =====
 async def get_db_pool():
@@ -123,16 +128,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
 
     # ===== Поиск по коду =====
-    if context.user_data.get("waiting_code") and txt.isdigit() and 3 <= len(txt) <= 5:
-        film = await get_film(pool, txt)
-        if film and film['file_id']:
-            await update.message.reply_video(film['file_id'], caption=film['title'])
+    if context.user_data.get("waiting_code"):
+        if txt.isdigit() and 3 <= len(txt) <= 5:
+            film = await get_film(pool, txt)
+            if film and film['file_id']:
+                await update.message.reply_video(film['file_id'], caption=film['title'])
+            else:
+                await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй название.")
+            context.user_data.pop("waiting_code", None)
+            await send_search_button(update, context)
+            return
         else:
-            await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй название.")
-        context.user_data.pop("waiting_code", None)
-        return
+            await update.message.reply_text("❌ Код должен содержать только 3–5 цифр!")
+            return
 
-    # ===== Поиск по HdRezka =====
+    # ===== HdRezka поиск =====
     rezka_result = await search_hdrezka(txt)
     if not rezka_result:
         await update.message.reply_text("❌ Фильм не найден.")
@@ -152,14 +162,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    user_id = query.from_user.id
+
+    # ===== Проверка подписок =====
+    not_sub = []
+    for chan, name in REQUIRED_CHANNELS:
+        try:
+            member = await context.bot.get_chat_member(chan, user_id)
+            if member.status not in ("member", "creator", "administrator"):
+                not_sub.append(name)
+        except:
+            not_sub.append(name)
 
     # ===== Кнопки поиска =====
     if data == "search_code":
+        if not_sub:
+            buttons = [[InlineKeyboardButton(name, url=f"https://t.me/{chan[1:]}")] for chan, name in REQUIRED_CHANNELS]
+            buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
+            markup = InlineKeyboardMarkup(buttons)
+            await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=markup)
+            return
         context.user_data["waiting_code"] = True
         await query.message.reply_text("Введите код фильма (3–5 цифр):")
         return
+
     if data == "search_hd":
         await query.message.reply_text("Введите название фильма для поиска:")
+        return
+
+    if data == "subscribed":
+        if not_sub:
+            await query.message.reply_text("❌ Вы ещё не подписались.")
+            return
+        context.user_data["waiting_code"] = True
+        await query.message.reply_text("Введите код фильма (3–5 цифр):")
         return
 
     # ===== Кнопки HdRezka =====
@@ -169,7 +205,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"Выбрана озвучка: {translator}\nТеперь выберите качество.")
         return
     if 'hd_quality_' in data:
-        quality = data.split('_')[2]
+        quality = data.split('_', 2)[2]
         rezka_obj = context.user_data.get('rezka_obj')
         translator = context.user_data.get('translator')
         if rezka_obj:
@@ -213,6 +249,38 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["add_title"] = " ".join(args[1:])
     await update.message.reply_text("Ок, отправьте видео.")
 
+async def del_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    code = context.args[0]
+    pool = context.bot_data["pool"]
+    result = await delete_film(pool, code)
+    if "DELETE 0" in result:
+        await update.message.reply_text("❌ Кода нет.")
+    else:
+        await update.message.reply_text("✅ Удалено.")
+
+async def edit_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args
+    if len(args) < 2:
+        return await update.message.reply_text("Использование: /editn <код> <новое название>")
+    code = args[0]
+    new_title = " ".join(args[1:])
+    pool = context.bot_data["pool"]
+    await update_film_title(pool, code, new_title)
+    await update.message.reply_text("✅ Название обновлено.")
+
+async def edit_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args
+    if not args:
+        return await update.message.reply_text("Использование: /editm <код>")
+    context.user_data["edit_code"] = args[0]
+    await update.message.reply_text("Отправьте видео.")
+
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -231,6 +299,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== Ошибки =====
 async def error_handler(update, context):
+    if isinstance(context.error, Conflict):
+        return
     logger.exception("Ошибка:", exc_info=context.error)
 
 # ===== MAIN =====
@@ -243,20 +313,31 @@ def main():
         app.bot_data["pool"] = await get_db_pool()
 
     app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
-    # Основные
+
+    # ===== Основные =====
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(CallbackQueryHandler(button_callback))
-    # Админ
+
+    # ===== Админ =====
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("list", list_films))
     app.add_handler(CommandHandler("add", add_command))
-    # Ошибки
+    app.add_handler(CommandHandler("del", del_command))
+    app.add_handler(CommandHandler("editn", edit_name))
+    app.add_handler(CommandHandler("editm", edit_media))
+
+    # ===== Ошибки =====
     app.add_error_handler(error_handler)
 
     logger.info("✅ Бот запущен.")
-    app.run_polling()
+    try:
+        app.run_polling()
+    except Conflict:
+        return
+    except Exception as e:
+        logger.exception("Ошибка при запуске:", exc_info=e)
 
 if __name__ == "__main__":
     main()
