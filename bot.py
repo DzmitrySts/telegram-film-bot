@@ -119,13 +119,16 @@ async def add_command(update, context):
     args = context.args
     if len(args) < 2:
         return await update.message.reply_text("Использование: /add <код> <название>")
+
     code = args[0]
     if not code.isdigit() or not 3 <= len(code) <= 5:
         return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
+
     pool = context.bot_data["pool"]
     film = await get_film(pool, code)
     if film:
         return await update.message.reply_text("❌ Такой код уже существует!")
+
     context.user_data["add_code"] = code
     context.user_data["add_title"] = " ".join(args[1:])
     await update.message.reply_text("Ок, отправьте видео.")
@@ -184,6 +187,7 @@ async def handle_text(update, context):
     await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
     txt = update.message.text.strip()
 
+    # Если ожидаем код фильма
     if context.user_data.get("waiting_code"):
         if txt.isdigit() and 3 <= len(txt) <= 5:
             return await send_film_by_code(update, context, txt)
@@ -192,11 +196,12 @@ async def handle_text(update, context):
         else:
             return await update.message.reply_text("❌ Код должен содержать только цифры!")
 
+    # Если ожидаем поиск по названию
     if context.user_data.get("waiting_name"):
         search = HdRezkaSearch("https://hdrezka.ag/")(txt)
         if not search:
             return await update.message.reply_text("❌ Фильмы не найдены.")
-        results = search[:5]
+        results = search[:5]  # максимум 5 вариантов
         kb = []
         name_map = {}
         for r in results:
@@ -218,7 +223,10 @@ async def send_film_by_code(update, context, code):
         await update.message.reply_video(film["file_id"], caption=film["title"])
         user_id = update.effective_user.id
         async with pool.acquire() as conn:
-            await conn.execute("INSERT INTO user_films(user_id, film_code) VALUES($1, $2)", user_id, code)
+            await conn.execute("""
+                INSERT INTO user_films(user_id, film_code)
+                VALUES($1, $2)
+            """, user_id, code)
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
     context.user_data.pop("waiting_code", None)
@@ -274,43 +282,28 @@ async def button_callback(update, context):
             await query.message.reply_text("Выберите озвучку:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
-    # Выбор озвучки и получение видео
+    # Выбор озвучки и отправка ссылки на Rezka
     if 'trans_map' in context.user_data:
         t_name = context.user_data['trans_map'].get(data)
         if t_name:
             rezka_obj = context.user_data['rezka_obj']
+            context.user_data['selected_translator'] = t_name
             translator_id = rezka_obj.translators_names.get(t_name, {}).get("id")
             if translator_id is None:
                 return await query.message.reply_text("❌ Не удалось найти перевод.")
-            try:
-                stream = rezka_obj.getStream(translation=translator_id)
-            except Exception:
-                return await query.message.reply_text("❌ Видео недоступно.")
-            if not stream.videos:
-                return await query.message.reply_text("❌ Видео недоступно.")
-
-            # Выбор качества
-            kb = []
-            quality_map = {}
-            for q in list(stream.videos.keys())[:3]:
-                cb = make_callback(q)
-                kb.append([InlineKeyboardButton(q, callback_data=cb)])
-                quality_map[cb] = q
-            context.user_data['stream'] = stream
-            context.user_data['quality_map'] = quality_map
-            await query.message.reply_text("Выберите качество:", reply_markup=InlineKeyboardMarkup(kb))
+            film_url = f"{rezka_obj.url}?translator={translator_id}"
+            await query.message.reply_text(f"🎬 Вот ваша ссылка на фильм:\n{film_url}")
+            context.user_data.clear()
+            await send_search_button(update, context)
             return
 
-    # Выбор качества и отправка видео
+    # Выбор качества (для фильмов из базы, если есть)
     if 'quality_map' in context.user_data:
         q = context.user_data['quality_map'].get(data)
         if q:
             stream = context.user_data['stream']
             url = stream(q)
-            try:
-                await query.message.reply_video(video=url, caption=f"Вот ваше видео ({q})")
-            except Exception:
-                await query.message.reply_text(f"Не удалось отправить видео напрямую, вот ссылка:\n{url}")
+            await query.message.reply_text(f"Вот ваша ссылка на видео ({q}):\n{url}")
             context.user_data.clear()
             await send_search_button(update, context)
             return
