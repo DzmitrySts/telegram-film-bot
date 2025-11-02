@@ -3,7 +3,6 @@ import os
 import logging
 import asyncpg
 import aiohttp
-import ssl
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
 from telegram.ext import (
@@ -76,19 +75,10 @@ async def list_all_films(pool):
 
 # ========== Поиск фильма по названию ==========
 async def search_film_by_name(title):
-    search_url = "https://kinobd.ru/playerdata"  # сайт поиска
-
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
-        async with session.post(search_url, data={"title": title}) as resp:
-            data = await resp.json(content_type=None)
-            # возвращаем первый найденный фильм, если есть
-            if data.get("results"):
-                return data["results"][0]  
-            return None
+    # Пример: можно использовать внешний API или базу данных
+    # Здесь делаем заглушку, возвращает None
+    # В будущем можешь заменить на реальный поиск
+    return None
 
 # ========== Кнопка поиска ==========
 async def send_search_button(update, context):
@@ -196,26 +186,25 @@ async def handle_video(update, context):
         context.user_data.clear()
         return await update.message.reply_text("✅ Фильм добавлен.")
 
+# ====== ИСПРАВЛЕННЫЙ handle_text ======
 async def handle_text(update, context):
     pool = context.bot_data["pool"]
     await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
 
     txt = update.message.text.strip()
 
-    # --- Если ждем код
-    if context.user_data.get("waiting_code"):
-        if txt.isdigit() and 3 <= len(txt) <= 5:
-            return await send_film_by_code(update, context, txt)
-        else:
-            return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
+    # --- Если ввели 3–5 цифр → поиск по коду
+    if txt.isdigit() and 3 <= len(txt) <= 5:
+        return await send_film_by_code(update, context, txt)
 
-    # --- Если просто отправили название фильма
+    # --- Иначе считаем текст названием фильма → поиск по названию
     film_data = await search_film_by_name(txt)
     if film_data:
         await update.message.reply_text(f"Нашел фильм: {film_data.get('title')}\nСсылка: {film_data.get('link')}")
     else:
         await update.message.reply_text("❌ Фильм не найден. Попробуй другое название.")
 
+    # --- В любом случае показываем кнопку поиска
     await send_search_button(update, context)
 
 async def send_film_by_code(update, context, code):
@@ -233,7 +222,6 @@ async def send_film_by_code(update, context, code):
             """, user_id, code)
     else:
         await update.message.reply_text("❌ У фильма нет файла.")
-    context.user_data.pop("waiting_code", None)
     await send_search_button(update, context)
 
 async def button_callback(update, context):
@@ -300,6 +288,7 @@ def main():
         return
     except Exception as e:
         logger.exception("Ошибка при запуске:", exc_info=e)
+
 
 if __name__ == "__main__":
     main()
