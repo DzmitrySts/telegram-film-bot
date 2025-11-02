@@ -17,21 +17,16 @@ from HdRezkaApi import HdRezkaSession
 # ========== Логирование ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logging.getLogger("telegram").setLevel(logging.CRITICAL)
-logging.getLogger("telegram.ext").setLevel(logging.CRITICAL)
 
 # ========== Настройки ==========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "481076515"))
 DATABASE_URL = os.environ.get("DATABASE_URL")
+HDREZKA_URL = "https://rezka-ua.tv/"
 
 REQUIRED_CHANNELS = [
     ("@offmatch", "Offmatch")
 ]
-
-HDREZKA_URL = "https://rezka-ua.tv/"  # рабочее зеркало
-HDREZKA_EMAIL = os.environ.get("HDREZKA_EMAIL")  # если авторизация появится
-HDREZKA_PASSWORD = os.environ.get("HDREZKA_PASSWORD")
 
 # ========== Подключение к БД ==========
 async def get_db_pool():
@@ -79,32 +74,38 @@ async def list_all_films(pool):
 
 # ========== HdRezka поиск ==========
 async def search_film_by_name(title: str):
-    try:
-        with HdRezkaSession(HDREZKA_URL) as session:
-            # если есть логин
-            if HDREZKA_EMAIL and HDREZKA_PASSWORD:
-                session.login(HDREZKA_EMAIL, HDREZKA_PASSWORD)
-            results = session.search(title, find_all=True)
-            films = []
-            for page in results:
-                for f in page:
-                    films.append({
-                        "title": f.get("title"),
-                        "url": f.get("url"),
-                        "image": f.get("image"),
-                        "category": f.get("category")
-                    })
-            return films
-    except Exception as e:
-        logger.exception("Ошибка при поиске фильма по названию")
+    results = HdRezkaSearch(HDREZKA_URL)(title, find_all=True)
+    if not results:
         return []
+    films = []
+    for page in results:
+        for film in page:
+            films.append({
+                "title": film["title"],
+                "url": film["url"],
+            })
+    return films
+
+async def get_film_stream(url: str, quality="720p"):
+    with HdRezkaSession(HDREZKA_URL) as session:
+        rezka = session.get(url.replace(HDREZKA_URL, ""))
+        if not rezka.ok:
+            return None
+        try:
+            stream = rezka.getStream()
+            urls = stream(quality)
+            if isinstance(urls, list) and urls:
+                return urls[0]
+            return None
+        except:
+            return None
 
 # ========== Кнопка поиска ==========
 async def send_search_button(update, context):
     kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")],
-          [InlineKeyboardButton("🔍 Поиск по названию", callback_data="search_name")]]
+          [InlineKeyboardButton("🎬 Поиск по названию", callback_data="search_name")]]
     await update.message.reply_text(
-        "Чтобы продолжить, выберите вариант поиска:",
+        "Чтобы продолжить, выберите способ поиска:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -202,27 +203,24 @@ async def handle_text(update, context):
     pool = context.bot_data["pool"]
     await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
     txt = update.message.text.strip()
+
     if context.user_data.get("waiting_code"):
         if txt.isdigit() and 3 <= len(txt) <= 5:
             return await send_film_by_code(update, context, txt)
         else:
             return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
-    elif context.user_data.get("waiting_name"):
+    
+    if context.user_data.get("waiting_name"):
         films = await search_film_by_name(txt)
         if not films:
-            context.user_data.pop("waiting_name", None)
-            return await update.message.reply_text("❌ Фильмов не найдено.")
+            return await update.message.reply_text("❌ Фильм не найден.")
+        buttons = []
         for f in films[:5]:  # максимум 5 вариантов
-            kb = [[InlineKeyboardButton("🔗 Смотреть", url=f['url'])]]
-            caption = f"{f['title']}\nКатегория: {f['category']}\nСсылка: {f['url']}"
-            if f.get('image'):
-                await update.message.reply_photo(f['image'], caption=caption, reply_markup=InlineKeyboardMarkup(kb))
-            else:
-                await update.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
-        context.user_data.pop("waiting_name", None)
-        await send_search_button(update, context)
-    else:
-        await send_search_button(update, context)
+            buttons.append([InlineKeyboardButton(f['title'], callback_data=f"film_{f['url']}")])
+        context.user_data.pop("waiting_name")
+        return await update.message.reply_text("Выберите фильм:", reply_markup=InlineKeyboardMarkup(buttons))
+    
+    await send_search_button(update, context)
 
 async def send_film_by_code(update, context, code):
     pool = context.bot_data["pool"]
@@ -231,14 +229,6 @@ async def send_film_by_code(update, context, code):
         return await update.message.reply_text("❌ Нет фильма с таким кодом.")
     if film["file_id"]:
         await update.message.reply_video(film["file_id"], caption=film["title"])
-        user_id = update.effective_user.id
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO user_films(user_id, film_code)
-                VALUES($1, $2)
-            """, user_id, code)
-    else:
-        await update.message.reply_text("❌ У фильма нет файла.")
     context.user_data.pop("waiting_code", None)
     await send_search_button(update, context)
 
@@ -246,6 +236,8 @@ async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+
+    # проверка подписки
     not_sub = []
     for chan, name in REQUIRED_CHANNELS:
         try:
@@ -254,25 +246,27 @@ async def button_callback(update, context):
                 not_sub.append(name)
         except:
             not_sub.append(name)
-    buttons = [[InlineKeyboardButton(name, url=f"https://t.me/{chan[1:]}")] for chan, name in REQUIRED_CHANNELS]
-    buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
-    markup = InlineKeyboardMarkup(buttons)
+    if not_sub:
+        buttons = [[InlineKeyboardButton(name, url=f"https://t.me/{chan[1:]}")] for chan, name in REQUIRED_CHANNELS]
+        buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
+        return await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=InlineKeyboardMarkup(buttons))
 
+    # выбор поиска
     if query.data == "search_code":
-        if not_sub:
-            return await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=markup)
         context.user_data["waiting_code"] = True
         return await query.message.reply_text("Введите код фильма (3–5 цифр):")
     if query.data == "search_name":
-        if not_sub:
-            return await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=markup)
         context.user_data["waiting_name"] = True
         return await query.message.reply_text("Введите название фильма:")
-    if query.data == "subscribed":
-        if not_sub:
-            return await query.message.reply_text("❌ Вы ещё не подписались.")
-        context.user_data["waiting_code"] = True
-        return await query.message.reply_text("Введите код фильма (3–5 цифр):")
+
+    # выбор фильма из результатов поиска
+    if query.data.startswith("film_"):
+        url = query.data[len("film_"):]
+        stream_url = await get_film_stream(url, quality="720p")
+        if not stream_url:
+            return await query.message.reply_text("❌ Не удалось получить ссылку на видео.")
+        kb = [[InlineKeyboardButton("🎬 Смотреть онлайн", url=stream_url)]]
+        await query.message.reply_text("Вот ваша ссылка:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def error_handler(update, context):
     logger.exception("Ошибка:", exc_info=context.error)
@@ -282,11 +276,12 @@ def main():
     if not TOKEN or not DATABASE_URL:
         logger.error("Нет TELEGRAM_TOKEN или DATABASE_URL")
         return
+
     async def on_startup(app):
         app.bot_data["pool"] = await get_db_pool()
+
     app = ApplicationBuilder().token(TOKEN).post_init(on_startup).build()
 
-    # Хендлеры
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("list", list_films))
@@ -304,6 +299,7 @@ def main():
         app.run_polling()
     except Exception as e:
         logger.exception("Ошибка при запуске:", exc_info=e)
+
 
 if __name__ == "__main__":
     main()
