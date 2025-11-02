@@ -12,8 +12,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from HdRezkaApi.search import HdRezkaSearch
-from HdRezkaApi import HdRezkaSession
 
 # ========== Логирование ==========
 logging.basicConfig(level=logging.INFO)
@@ -29,8 +27,6 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 REQUIRED_CHANNELS = [
     ("@offmatch", "Offmatch")
 ]
-
-HDREZKA_ORIGIN = "https://rezka-ua.tv/"  # рабочий URL
 
 # ========== Подключение к БД ==========
 async def get_db_pool():
@@ -76,21 +72,42 @@ async def list_all_films(pool):
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT code, title FROM films ORDER BY code")
 
-# ========== Работа с HdRezka ==========
-async def search_film_by_name(title: str):
-    async with HdRezkaSession(HDREZKA_ORIGIN) as session:
-        results = session.search(title, find_all=False)
-        if not results:
-            return []
-        # results — это список словарей с title и url
-        return results
-
 # ========== Кнопка поиска ==========
 async def send_search_button(update, context):
-    kb = [[InlineKeyboardButton("🔍 Поиск фильма по коду или названию", callback_data="search_code")]]
+    kb = [
+        [InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")],
+        [InlineKeyboardButton("🎬 Поиск по MoviesAPI", callback_data="search_moviesapi")]
+    ]
+
     await update.message.reply_text(
-        "Чтобы продолжить, нажмите кнопку «🔍 Поиск фильма по коду или названию».",
+        "Чтобы продолжить, выберите способ поиска.",
         reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+# ========== MoviesAPI логика ==========
+async def handle_moviesapi_query(update, context, text):
+    parts = text.split()
+
+    # ФИЛЬМ — только ID
+    if len(parts) == 1:
+        movie_id = parts[0]
+        url = f"https://moviesapi.to/movie/{movie_id}"
+        await update.message.reply_text(url)
+        return
+
+    # СЕРИАЛ — id season episode
+    if len(parts) == 3:
+        show_id = parts[0]
+        season = parts[1]
+        episode = parts[2]
+        url = f"https://moviesapi.to/tv/{show_id}-{season}-{episode}"
+        await update.message.reply_text(url)
+        return
+
+    await update.message.reply_text(
+        "❌ Формат неправильный.\n\n"
+        "Фильм: `<id>`\n"
+        "Сериал: `<id> <season> <episode>`"
     )
 
 # ========== Хендлеры ==========
@@ -99,7 +116,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await add_user(pool, u.id, u.username, u.first_name)
 
-    await send_search_button(update, context)
+    kb = [
+        [InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")],
+        [InlineKeyboardButton("🎬 Поиск по MoviesAPI", callback_data="search_moviesapi")]
+    ]
+
+    await update.message.reply_text(
+        "Привет! 👋\nВыберите способ поиска.",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -192,21 +217,23 @@ async def handle_text(update, context):
     await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
 
     txt = update.message.text.strip()
+
+    # ===== MoviesAPI режим =====
+    if context.user_data.get("waiting_moviesapi"):
+        await handle_moviesapi_query(update, context, txt)
+        context.user_data.pop("waiting_moviesapi", None)
+        return await send_search_button(update, context)
+
+    # ===== Поиск по коду =====
     if not context.user_data.get("waiting_code"):
         return await send_search_button(update, context)
 
-    # Если это код — ищем по базе
     if txt.isdigit() and 3 <= len(txt) <= 5:
         return await send_film_by_code(update, context, txt)
-    
-    # Иначе ищем по названию через HdRezka
-    search_results = await search_film_by_name(txt)
-    if not search_results:
-        return await update.message.reply_text("❌ Фильмов не найдено.")
-    
-    # Формируем кнопки с URL
-    buttons = [[InlineKeyboardButton(f['title'], url=f['url'])] for f in search_results]
-    await update.message.reply_text("Выберите фильм:", reply_markup=InlineKeyboardMarkup(buttons))
+    elif txt.isdigit():
+        return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
+    else:
+        return await update.message.reply_text("❌ Код должен содержать только цифры!")
 
 async def send_film_by_code(update, context, code):
     pool = context.bot_data["pool"]
@@ -230,6 +257,8 @@ async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+
+    # проверка подписки
     not_sub = []
     for chan, name in REQUIRED_CHANNELS:
         try:
@@ -243,17 +272,29 @@ async def button_callback(update, context):
     buttons.append([InlineKeyboardButton("✅ Подписался", callback_data="subscribed")])
     markup = InlineKeyboardMarkup(buttons)
 
+    # ====== кнопка поиска по коду ======
     if query.data == "search_code":
         if not_sub:
             return await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=markup)
         context.user_data["waiting_code"] = True
-        return await query.message.reply_text("Введите код фильма (3–5 цифр) или название:")
+        context.user_data.pop("waiting_moviesapi", None)
+        return await query.message.reply_text("Введите код фильма (3–5 цифр):")
+
+    # ====== кнопка поиска по MoviesAPI ======
+    if query.data == "search_moviesapi":
+        context.user_data["waiting_moviesapi"] = True
+        context.user_data.pop("waiting_code", None)
+        return await query.message.reply_text(
+            "Введите запрос:\n\n"
+            "Фильм: `<id>`\n"
+            "Сериал: `<id> <season> <episode>`"
+        )
 
     if query.data == "subscribed":
         if not_sub:
             return await query.message.reply_text("❌ Вы ещё не подписались.")
         context.user_data["waiting_code"] = True
-        return await query.message.reply_text("Введите код фильма (3–5 цифр) или название:")
+        return await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
 async def error_handler(update, context):
     if isinstance(context.error, Conflict):
@@ -287,9 +328,10 @@ def main():
     try:
         app.run_polling()
     except Conflict:
-        logger.error("Конфликт: бот уже запущен где-то еще.")
+        return
     except Exception as e:
         logger.exception("Ошибка при запуске:", exc_info=e)
+
 
 if __name__ == "__main__":
     main()
