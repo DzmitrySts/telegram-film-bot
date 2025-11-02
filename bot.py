@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import os
 import logging
-import aiohttp
 import asyncpg
+import aiohttp
+import ssl
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict
 from telegram.ext import (
@@ -73,28 +74,27 @@ async def list_all_films(pool):
     async with pool.acquire() as conn:
         return await conn.fetch("SELECT code, title FROM films ORDER BY code")
 
-# ========== Поиск по названию через Kinobd ==========
+# ========== Поиск фильма по названию ==========
 async def search_film_by_name(title):
-    search_url = "https://kinobd.ru/playerdata"
-    async with aiohttp.ClientSession() as session:
+    search_url = "https://kinobd.ru/playerdata"  # сайт поиска
+
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
         async with session.post(search_url, data={"title": title}) as resp:
-            if resp.status != 200:
-                return None
             data = await resp.json(content_type=None)
-            # Пробуем найти mp4 или iframe
-            for provider in data.values():
-                if provider.get("iframe"):
-                    # Если это ссылка на mp4 напрямую — вернём
-                    iframe_url = provider["iframe"]
-                    if iframe_url.endswith(".mp4") or "videocdn" in iframe_url:
-                        return {"title": title, "video_url": iframe_url}
-    return None
+            # возвращаем первый найденный фильм, если есть
+            if data.get("results"):
+                return data["results"][0]  
+            return None
 
 # ========== Кнопка поиска ==========
 async def send_search_button(update, context):
-    kb = [[InlineKeyboardButton("🔍 Поиск по коду или названию", callback_data="search_code")]]
+    kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
     await update.message.reply_text(
-        "Чтобы продолжить, нажмите кнопку «🔍 Поиск по коду или названию».",
+        "Чтобы продолжить, нажмите кнопку «🔍 Поиск по коду».",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -104,9 +104,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     await add_user(pool, u.id, u.username, u.first_name)
 
-    kb = [[InlineKeyboardButton("🔍 Поиск по коду или названию", callback_data="search_code")]]
+    kb = [[InlineKeyboardButton("🔍 Поиск по коду", callback_data="search_code")]]
     await update.message.reply_text(
-        "Привет! 👋\nНажмите кнопку «🔍 Поиск по коду или названию» для поиска фильма.",
+        "Привет! 👋\nНажмите кнопку «🔍 Поиск по коду» для поиска фильма.",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -201,26 +201,40 @@ async def handle_text(update, context):
     await add_user(pool, update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
 
     txt = update.message.text.strip()
-    if not context.user_data.get("waiting_code"):
-        return await send_search_button(update, context)
 
-    # Если это код — поиск по коду
-    if txt.isdigit() and 3 <= len(txt) <= 5:
-        pool = context.bot_data["pool"]
-        film = await get_film(pool, txt)
-        if not film:
-            return await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй ввести другой код.")
-        if film["file_id"]:
-            await update.message.reply_video(film["file_id"], caption=film["title"])
+    # --- Если ждем код
+    if context.user_data.get("waiting_code"):
+        if txt.isdigit() and 3 <= len(txt) <= 5:
+            return await send_film_by_code(update, context, txt)
         else:
-            await update.message.reply_text("❌ У фильма нет файла.")
+            return await update.message.reply_text("❌ Код должен быть от 3 до 5 цифр!")
+
+    # --- Если просто отправили название фильма
+    film_data = await search_film_by_name(txt)
+    if film_data:
+        await update.message.reply_text(f"Нашел фильм: {film_data.get('title')}\nСсылка: {film_data.get('link')}")
     else:
-        # Поиск по названию через Kinobd
-        film_data = await search_film_by_name(txt)
-        if film_data:
-            await update.message.reply_video(film_data["video_url"], caption=film_data["title"])
-        else:
-            await update.message.reply_text("❌ Фильм не найден")
+        await update.message.reply_text("❌ Фильм не найден. Попробуй другое название.")
+
+    await send_search_button(update, context)
+
+async def send_film_by_code(update, context, code):
+    pool = context.bot_data["pool"]
+    film = await get_film(pool, code)
+    if not film:
+        return await update.message.reply_text("❌ Нет фильма с таким кодом. Попробуй ввести другой код.")
+    if film["file_id"] is not None:
+        await update.message.reply_video(film["file_id"], caption=film["title"])
+        user_id = update.effective_user.id
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO user_films(user_id, film_code)
+                VALUES($1, $2)
+            """, user_id, code)
+    else:
+        await update.message.reply_text("❌ У фильма нет файла.")
+    context.user_data.pop("waiting_code", None)
+    await send_search_button(update, context)
 
 async def button_callback(update, context):
     query = update.callback_query
@@ -243,13 +257,13 @@ async def button_callback(update, context):
         if not_sub:
             return await query.message.reply_text("📢 Подпишитесь на канал:", reply_markup=markup)
         context.user_data["waiting_code"] = True
-        return await query.message.reply_text("Введите код фильма (3–5 цифр) или название:")
+        return await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
     if query.data == "subscribed":
         if not_sub:
             return await query.message.reply_text("❌ Вы ещё не подписались.")
         context.user_data["waiting_code"] = True
-        return await query.message.reply_text("Введите код фильма (3–5 цифр) или название:")
+        return await query.message.reply_text("Введите код фильма (3–5 цифр):")
 
 async def error_handler(update, context):
     if isinstance(context.error, Conflict):
@@ -286,7 +300,6 @@ def main():
         return
     except Exception as e:
         logger.exception("Ошибка при запуске:", exc_info=e)
-
 
 if __name__ == "__main__":
     main()
